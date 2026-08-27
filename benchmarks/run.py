@@ -21,10 +21,22 @@ from helios.runtime.worker import Tokenizer
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "benchmarks" / "results"
 PROMPTS = (
+    "Reply with one word: ready.",
     "Explain the value of a key-value cache during autoregressive language-model decoding.",
     "Explain solar power simply, using one practical example.",
-    "Compare a Python list and a dictionary in a concise paragraph.",
-    "Give three concrete ways a small team can make a web service more reliable.",
+    (
+        "A small team runs an online booking service for local clinics. Patients can search "
+        "for appointments, receive reminder messages, reschedule visits, and upload insurance "
+        "documents. The team has seen duplicate bookings during traffic spikes, occasional slow "
+        "searches after importing new provider schedules, and confusing error messages when a "
+        "reminder provider is unavailable. They have one backend service, a PostgreSQL database, "
+        "a background worker for reminders, and basic request logs. They cannot afford a full "
+        "rewrite or a large operations team. Propose a practical reliability plan for the next "
+        "three months. Prioritize the work, explain the tradeoffs, identify what should be "
+        "measured, and give concrete examples of changes the team can make to prevent duplicate "
+        "bookings, keep search responsive, and handle reminder failures gracefully. Keep the "
+        "answer structured and specific enough for an engineer to begin implementation."
+    ),
 )
 
 
