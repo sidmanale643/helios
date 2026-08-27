@@ -29,12 +29,18 @@ Command = Annotated[GenerateCommand | HealthCommand, Field(discriminator="operat
 command_adapter = TypeAdapter(Command)
 
 
+class GenerationTiming(BaseModel):
+    prefill_seconds: float = Field(ge=0)
+    inter_token_seconds: list[float] = Field(default_factory=list)
+
+
 class GenerateResult(BaseModel):
     protocol_version: Literal[1] = PROTOCOL_VERSION
     operation: Literal["generate"] = "generate"
     request_id: str
     output_ids: list[TokenId]
     finish_reason: Literal["eos", "length"]
+    timing: GenerationTiming | None = None
 
 
 class HealthResult(BaseModel):
