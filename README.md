@@ -5,17 +5,17 @@ Helios runs as two local processes separated by one ZeroMQ connection:
 - `helios` owns FastAPI and CPU-only tokenization/detokenization.
 - `helios-scheduler` owns the FIFO scheduler, model, KV cache, and GPU sampling.
 
-Set `HF_TOKEN` (or `HF_API_KEY`) in the environment, then start the scheduler:
-
-```bash
-uv run helios-scheduler
-```
-
-In another terminal, start the HTTP frontend:
+Set `HF_TOKEN` (or `HF_API_KEY`) in the environment, then start Helios:
 
 ```bash
 uv run helios
 ```
+
+This one command starts the GPU scheduler, waits for the model to load, then
+starts the HTTP frontend. Press `Ctrl-C` once to stop both processes.
+
+`helios-scheduler` remains available when you deliberately want to run the
+scheduler independently.
 
 The ASGI application is exposed as `helios.main:app`. The legacy
 `main:app` import path remains available for existing deployments.
