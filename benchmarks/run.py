@@ -20,7 +20,12 @@ from helios.runtime.worker import Tokenizer
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "benchmarks" / "results"
-PROMPT = "Explain the value of a key-value cache during autoregressive language-model decoding."
+PROMPTS = (
+    "Explain the value of a key-value cache during autoregressive language-model decoding.",
+    "Explain solar power simply, using one practical example.",
+    "Compare a Python list and a dictionary in a concise paragraph.",
+    "Give three concrete ways a small team can make a web service more reliable.",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -108,6 +113,7 @@ def report(
         "╭─ Helios benchmark ─────────────────────────────────────",
         f"│  {record['name']}  ·  {record['model']['id']}@{record['model']['revision'][:12]}",
         f"│  {accelerator_info['name']} ({accelerator_info['kind']})  ·  {machine['hostname']}",
+        f"│  {record['workload']['prompts']} prompts × {record['workload']['runs']} runs",
         "├────────────────────────────────────────────────────────",
         f"│  End-to-end latency  {duration(metrics['median_end_to_end_seconds']):>10}",
         f"│  Time to first token {duration(metrics['median_time_to_first_token_seconds']):>10}",
@@ -142,12 +148,12 @@ def main() -> None:
     tokenizer = Tokenizer.load(config)
     client = SchedulerClient(config)
     health = client.health()
-    prompt_tokens = len(tokenizer.tokenize(PROMPT))
+    prompt_tokens = [len(tokenizer.tokenize(prompt)) for prompt in PROMPTS]
     sampling = Sampling(temperature=0, top_p=1, max_new_tokens=args.max_new_tokens)
 
-    def generate() -> tuple[int, float, float, list[float]]:
+    def generate(prompt: str) -> tuple[int, float, float, list[float]]:
         started = time.perf_counter()
-        prompt_ids = tokenizer.tokenize(PROMPT)
+        prompt_ids = tokenizer.tokenize(prompt)
         result = client.generate(
             model_id=tokenizer.model_id,
             model_revision=tokenizer.model_revision,
@@ -166,16 +172,18 @@ def main() -> None:
             result.timing.inter_token_seconds,
         )
 
-    generate()
-    samples = [generate() for _ in range(args.runs)]
-    output_tokens = {tokens for tokens, _, _, _ in samples}
-    if len(output_tokens) != 1:
-        raise RuntimeError(f"Inconsistent generated-token counts: {sorted(output_tokens)}")
-    tokens = output_tokens.pop()
-    durations = [duration for _, duration, _, _ in samples]
-    prefill_times = [prefill for _, _, prefill, _ in samples]
-    inter_token_times = [time for _, _, _, times in samples for time in times]
-    throughput = tokens / median(durations)
+    for prompt in PROMPTS:
+        generate(prompt)
+    samples = [
+        (prompt_index, *generate(prompt))
+        for _ in range(args.runs)
+        for prompt_index, prompt in enumerate(PROMPTS)
+    ]
+    tokens = [count for _, count, _, _, _ in samples]
+    durations = [duration for _, _, duration, _, _ in samples]
+    prefill_times = [prefill for _, _, _, prefill, _ in samples]
+    inter_token_times = [time for _, _, _, _, times in samples for time in times]
+    throughput = median(count / duration for count, duration in zip(tokens, durations))
     now = datetime.now(UTC)
     record = {
         "schema_version": 1,
@@ -190,8 +198,9 @@ def main() -> None:
         "git": {"commit": git(["rev-parse", "HEAD"]), "dirty": bool(git(["status", "--porcelain"]))},
         "model": {"id": health.model_id, "revision": health.model_revision},
         "workload": {
-            "prompt_sha256": hashlib.sha256(PROMPT.encode()).hexdigest(),
+            "prompt_sha256": hashlib.sha256("\n".join(PROMPTS).encode()).hexdigest(),
             "prompt_tokens": prompt_tokens,
+            "prompts": len(PROMPTS),
             "max_new_tokens": args.max_new_tokens,
             "temperature": sampling.temperature,
             "top_p": sampling.top_p,
@@ -199,15 +208,16 @@ def main() -> None:
         },
         "samples": [
             {
+                "prompt_index": prompt_index,
                 "output_tokens": count,
                 "end_to_end_seconds": duration,
                 "time_to_first_token_seconds": prefill,
                 "inter_token_seconds": times,
             }
-            for count, duration, prefill, times in samples
+            for prompt_index, count, duration, prefill, times in samples
         ],
         "metrics": {
-            "output_tokens": tokens,
+            "median_output_tokens": median(tokens),
             "median_end_to_end_seconds": median(durations),
             "median_time_to_first_token_seconds": median(prefill_times),
             "median_inter_token_latency_seconds": (
