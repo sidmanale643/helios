@@ -101,3 +101,16 @@ run:
 ```bash
 uv run python run_batch.py
 ```
+
+## Benchmarks
+
+Use the repeatable scheduler benchmark to track throughput after a code change
+or across machines and accelerators:
+
+```bash
+uv run python benchmarks/run.py --name decode-128
+```
+
+Each invocation stores its full environment and result under `benchmarks/results/`
+and reports improvement or worsening against the latest equivalent run. See
+[`benchmarks/README.md`](benchmarks/README.md) for workload options and comparison rules.
