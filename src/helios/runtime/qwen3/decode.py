@@ -2,6 +2,7 @@ import time
 
 import torch
 
+from helios.runtime.prefix_cache import PrefixCacheHit
 from helios.runtime.qwen3.cache import KVCache
 from helios.runtime.qwen3.model import Qwen3Model
 from helios.runtime.types import Sampling
@@ -18,16 +19,37 @@ class Decoder:
         sampling: Sampling,
         *,
         max_total_tokens: int,
-    ) -> tuple[list[int], str, dict[str, float | list[float]]]:
+        prefix_hit: PrefixCacheHit | None = None,
+    ) -> tuple[list[int], str, dict[str, float | list[float]], KVCache]:
         capacity = len(input_ids) + sampling.max_new_tokens
         if capacity > max_total_tokens:
             raise ValueError(
                 f"Request needs {capacity:,} KV-cache tokens, but the profiled "
                 f"limit is {max_total_tokens:,}."
             )
-        token_tensor = torch.tensor(input_ids, device=self.device).unsqueeze(0)
         # Cache capacity includes the prompt and the maximum possible continuation.
         cache = KVCache(self.model.config, capacity, device=self.device)
+        cached_blocks = prefix_hit.blocks if prefix_hit is not None else ()
+        if prefix_hit is not None:
+            if any(
+                len(block.tokens) != block.snapshot.length
+                for block in cached_blocks
+            ):
+                raise ValueError("Prefix-cache token and KV block lengths do not match.")
+            cached_tokens = tuple(
+                token for block in cached_blocks for token in block.tokens
+            )
+            if len(cached_tokens) > len(input_ids):
+                raise ValueError("Prefix-cache hit is longer than the request prompt.")
+            if tuple(input_ids[: len(cached_tokens)]) != cached_tokens:
+                raise ValueError("Prefix-cache hit does not match the request tokens.")
+            if len(cached_tokens) == len(input_ids):
+                cached_blocks = cached_blocks[:-1]
+
+        cache.restore_blocks(tuple(block.snapshot for block in cached_blocks))
+        token_tensor = torch.tensor(
+            input_ids[cache.length :], device=self.device
+        ).unsqueeze(0)
         generated: list[int] = []
         inter_token_seconds: list[float] = []
         finish_reason = "length"
@@ -53,10 +75,15 @@ class Decoder:
                     self._synchronize()
                     started = time.perf_counter()
                     logits = self.model(next_token, cache=cache)[:, -1, :]
-        return generated, finish_reason, {
-            "prefill_seconds": prefill_seconds,
-            "inter_token_seconds": inter_token_seconds,
-        }
+        return (
+            generated,
+            finish_reason,
+            {
+                "prefill_seconds": prefill_seconds,
+                "inter_token_seconds": inter_token_seconds,
+            },
+            cache,
+        )
 
     @property
     def device(self) -> torch.device:
