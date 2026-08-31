@@ -12,3 +12,5 @@ wheels/
 .venv
 .env
 tmp/
+trans.py
+*.ipynb
