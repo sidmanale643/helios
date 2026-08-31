@@ -7,10 +7,8 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.141.1",
     "huggingface-hub>=0.36.0",
-    "ipykernel>=7.3.0",
     "numpy>=1.26.0",
     "python-dotenv>=1.1.0",
-    "pyzmq>=27.1.0",
     "safetensors>=0.7.0",
     "tokenizers>=0.22.0",
     "torch>=2.13.0",
@@ -19,7 +17,6 @@ dependencies = [
 
 [project.scripts]
 helios = "helios.main:main"
-helios-scheduler = "helios.scheduler_main:main"
 
 [build-system]
 requires = ["uv_build>=0.7.13,<0.8.0"]
