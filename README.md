@@ -1,116 +1,190 @@
 # Helios
 
-Helios runs as two local processes separated by one ZeroMQ connection:
+Helios is a small, readable inference engine for running
+[Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) locally. It implements the
+model architecture and generation loop in PyTorch, including grouped-query
+attention, rotary embeddings, autoregressive decoding, and a KV cache.
 
-- `helios` owns FastAPI and CPU-only tokenization/detokenization.
-- `helios-scheduler` owns the FIFO scheduler, model, KV cache, and GPU sampling.
+The project is built for learning and experimentation: the code favors explicit
+inference mechanics over framework abstractions. Helios is not a production
+serving system yet.
 
-Set `HF_TOKEN` (or `HF_API_KEY`) in the environment, then start Helios:
+## Highlights
+
+- Native Qwen3-4B implementation with Hugging Face safetensor loading
+- CUDA, Apple Metal, and CPU device selection
+- Memory admission before weight loading and KV-cache sizing after loading
+- Prompt prefill followed by cached token-by-token decoding
+- FastAPI frontend with an OpenAI-style HTTP API
+- A single in-process tokenizer and model runtime
+- Repeatable benchmarks with latency, TTFT, inter-token latency, and throughput
+
+## Architecture
+
+Helios runs the HTTP API, tokenizer, and model runtime in one local process:
+
+```mermaid
+flowchart LR
+    Client[HTTP client] --> API[FastAPI frontend]
+    API --> Tokenizer[Tokenizer]
+    Tokenizer --> Engine[Qwen3 engine]
+    Engine --> Cache[KV cache]
+    Engine --> Device[CUDA / Metal / CPU]
+    Tokenizer --> API
+```
+
+The API owns tokenization, detokenization, validation, model execution, and KV
+cache management. Generations are serialized in-process because the runtime
+uses mutable KV-cache state.
+
+## Requirements
+
+- Python 3.11 or newer
+- [uv](https://docs.astral.sh/uv/)
+- Enough memory for Qwen3-4B weights and a KV cache
+- Internet access on the first run to download the model snapshot
+
+Helios uses float16 on CUDA and Metal and float32 on CPU. Startup is refused if
+the model and configured memory headroom do not fit on the selected device.
+
+## Quick start
 
 ```bash
+git clone https://github.com/sidmanale643/helios.git
+cd helios
+uv sync
 uv run helios
 ```
 
-This one command starts the GPU scheduler, waits for the model to load, then
-starts the HTTP frontend. Press `Ctrl-C` once to stop both processes.
+The first run downloads the model and tokenizer from Hugging Face. Set
+`HF_TOKEN` if your Hugging Face environment requires authentication.
 
-`helios-scheduler` remains available when you deliberately want to run the
-scheduler independently.
+`uv run helios` loads the model, then serves the API at
+`http://127.0.0.1:8000`.
 
-The ASGI application is exposed as `helios.main:app`. The legacy
-`main:app` import path remains available for existing deployments.
-
-The ASGI process loads only the tokenizer. The scheduler process loads the model
-and binds to `tcp://127.0.0.1:5555` by default. Once both are ready, check them
-through the HTTP frontend:
+Check readiness:
 
 ```bash
 curl http://127.0.0.1:8000/health
 ```
 
-Before loading weights, Helios selects CUDA, Apple Metal, or CPU, measures
-currently available memory, and counts the configured model's parameters with
-meta tensors. It reserves 20% headroom for loader buffers and refuses startup
-when the estimated model weights cannot fit. After the weights load, Helios
-profiles the remaining device memory, reserves further headroom, and derives a
-single-request KV-cache token limit from the model's layers, KV heads, head
-dimension, and dtype. The health response includes that limit; requests that
-would exceed it are rejected before generation.
+Interactive API documentation is available at
+[`http://127.0.0.1:8000/docs`](http://127.0.0.1:8000/docs).
 
-The frontend converts text to CPU token IDs and sends only those IDs, the EOS
-token ID, and sampling settings to the scheduler. The scheduler returns only
-generated token IDs, which the frontend detokenizes on the CPU. Model logits
-never cross the ZeroMQ boundary.
+## API
 
-Each generation gets an isolated fixed-capacity KV cache. Helios pre-fills it
-once with the prompt, then runs each generated token against cached keys and
-values rather than recomputing the full prompt. The cache stores only Qwen3's
-8 KV heads per layer (not the expanded 32 query heads), and is released when
-the request finishes.
+### OpenAI-style chat completions
 
-Helios's primary model is the native Qwen3-4B architecture, with weights from
-`Qwen/Qwen3-4B`. The native runtime separates the architecture, safetensor
-weight mapping, tokenizer/chat template, and decoding under `runtime/qwen3/`.
-Its architecture follows the [Qwen3 standalone reference](https://github.com/rasbt/LLMs-from-scratch/blob/main/ch05/11_qwen3/standalone-qwen3.ipynb):
-36 layers, 2,560 hidden width, 32 query heads, 8 KV heads, and a 9,728-wide
-SwiGLU MLP. `HELIOS_MODEL_ID` must remain `Qwen/Qwen3-4B` until another native
-architecture is implemented. Set `HELIOS_WEIGHT_HEADROOM_RATIO` and
-`HELIOS_KV_CACHE_HEADROOM_RATIO` as needed; both headroom ratios default to
-`0.20`.
-
-Generate text with:
+Helios implements a small, non-streaming subset of `POST /v1/chat/completions`:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/generate \
-  -H 'content-type: application/json' \
-  -d '{"text":"Explain solar power simply.","sampling":{"temperature":0.2,"max_new_tokens":128}}'
+curl http://127.0.0.1:8000/v1/chat/completions \
+  --header 'content-type: application/json' \
+  --data '{
+    "model": "Qwen/Qwen3-4B",
+    "messages": [
+      {"role": "system", "content": "Answer clearly and briefly."},
+      {"role": "user", "content": "Why is the sky blue?"}
+    ],
+    "temperature": 0.2,
+    "max_tokens": 128,
+    "stream": false
+  }'
 ```
 
-The HTTP layer is in `api/`. The CPU tokenizer worker, ZeroMQ protocol/client,
-FIFO scheduler, model admission, and generation runtime are in `runtime/`. The
-HTTP API exposes `POST /generate`; `prompt` is accepted as an input alias for
-`text`. Flat sampling fields remain accepted.
+The endpoint returns an OpenAI-style response with one assistant choice and
+prompt, completion, and total token counts. Streaming and tool calls are not
+implemented.
 
-The model and tokenizer processes must resolve the same Hugging Face snapshot.
-Set `HELIOS_MODEL_REVISION` to pin one explicitly. `HELIOS_SCHEDULER_ENDPOINT`
-changes the ZeroMQ endpoint, and `HELIOS_SCHEDULER_TIMEOUT_MS` changes the
-generation response timeout.
+## Python usage
 
-## Run a batch from Python
-
-With `helios-scheduler` running, the CPU frontend can also be used directly:
+Use the tokenizer frontend directly:
 
 ```python
 from helios.config import get_config
-from helios.runtime.client import SchedulerClient
+from helios.runtime.engine import Engine
 from helios.runtime.frontend import TextGenerator
 from helios.runtime.types import GenerateRequest
 from helios.runtime.worker import Tokenizer
 
 config = get_config()
-generator = TextGenerator(Tokenizer.load(config), SchedulerClient(config))
-prompts = ["Explain solar power simply.", "Explain photosynthesis simply."]
-responses = [generator.run(GenerateRequest(text=prompt)) for prompt in prompts]
+generator = TextGenerator(Tokenizer.load(config), Engine(config))
+
+response = generator.run(
+    GenerateRequest(
+        text="Explain solar power simply.",
+        sampling={"temperature": 0.2, "max_new_tokens": 128},
+    )
+)
+print(response)
 ```
 
-For per-prompt sampling settings, pass `GenerateRequest` objects instead of strings.
-
-For a reusable editable batch, update the `prompts` list in `run_batch.py` and
+For an editable multi-prompt example, update `prompts` in `run_batch.py` and
 run:
 
 ```bash
 uv run python run_batch.py
 ```
 
+Only one generation runs at a time to protect the mutable model cache.
+
+## Configuration
+
+Helios loads `.env` automatically and supports the following environment
+variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HELIOS_MODEL_ID` | `Qwen/Qwen3-4B` | Model repository. The native runtime currently supports only this architecture. |
+| `HELIOS_MODEL_REVISION` | latest resolved snapshot | Pin the tokenizer and model to one Hugging Face revision. |
+| `HF_TOKEN` / `HF_API_KEY` | unset | Hugging Face authentication token. |
+| `HELIOS_WEIGHT_HEADROOM_RATIO` | `0.20` | Extra free-memory ratio required before loading weights. |
+| `HELIOS_KV_CACHE_HEADROOM_RATIO` | `0.20` | Memory reserved when sizing the KV cache after model loading. |
+
+Both headroom ratios must be at least `0` and less than `1`.
+
 ## Benchmarks
 
-Use the repeatable scheduler benchmark to track throughput after a code change
-or across machines and accelerators:
+Record a repeatable benchmark:
 
 ```bash
 uv run python benchmarks/run.py --name decode-128
 ```
 
-Each invocation stores its full environment and result under `benchmarks/results/`
-and reports improvement or worsening against the latest equivalent run. See
-[`benchmarks/README.md`](benchmarks/README.md) for workload options and comparison rules.
+Each run warms up the model, measures a fixed prompt suite, writes environment
+and timing metadata under `benchmarks/results/`, and compares the result with
+the latest equivalent run. See [benchmarks/README.md](benchmarks/README.md) for
+the measurement protocol and workload options.
+
+## Project layout
+
+```text
+src/helios/
+├── api/                 # FastAPI application, routes, and HTTP types
+├── runtime/
+│   ├── qwen3/           # Model, layers, tokenizer, weights, and KV cache
+│   ├── frontend.py      # CPU text frontend
+│   ├── generate.py      # Generation runtime
+│   └── engine.py        # In-process model runtime
+├── config.py            # Environment-backed runtime policy
+└── main.py              # Local server
+benchmarks/              # Reproducible benchmark runner and results
+run_batch.py             # Editable Python batch example
+```
+
+## Scope
+
+Helios intentionally starts from a compact, correct baseline before adding
+serving complexity. Continuous batching, paged attention, quantization,
+streaming, and optimized kernels are outside the current implementation.
+
+## Acknowledgements
+
+- [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) for the model weights and tokenizer
+- [LLMs from Scratch: Qwen3](https://github.com/rasbt/LLMs-from-scratch/tree/main/ch05/11_qwen3) for a readable architecture reference
+- [PyTorch](https://pytorch.org/) and [FastAPI](https://fastapi.tiangolo.com/)
+
+## License
+
+This repository does not currently include a license. Until one is added, the
+code is not granted for reuse or redistribution.
