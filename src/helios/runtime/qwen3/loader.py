@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -27,12 +27,12 @@ class Qwen3Loader:
                 f"received {config.model_id}."
             )
         checker = MemoryChecker(config)
-        report = checker.weights_for()
+        report = checker.weights()
         if not report.fits:
-            available = report.device.available_memory_bytes or 0
             raise RuntimeError(
-                f"Refusing to load {config.model_id}: {report.reason} "
-                f"Required {report.weights.required_bytes:,} bytes; available {available:,} bytes."
+                f"Refusing to load {config.model_id}: weights and headroom need "
+                f"{report.required_bytes:,} bytes; {report.free_before_load_bytes:,} "
+                "bytes are free."
             )
         snapshot = Path(
             snapshot_download(
@@ -42,14 +42,12 @@ class Qwen3Loader:
                 allow_patterns=["model*.safetensors", "model.safetensors.index.json"],
             )
         )
-        native_config = qwen3_4b_config(checker.dtype(report.device))
-        with torch.device(report.device.type):
+        native_config = qwen3_4b_config(checker.dtype)
+        with torch.device("cuda"):
             model = Qwen3Model(native_config)
         weights = Qwen3Weights(snapshot)
         weights.load_into(model)
         model.eval()
-        cache = checker.cache_for(native_config, report.device)
-        report = MemoryReport(
-            report.device, report.weights, report.fits, report.reason, cache
-        )
+        cache = checker.cache(native_config)
+        report = replace(report, cache=cache)
         return LoadedQwen3(model, cache, report, snapshot.name)
