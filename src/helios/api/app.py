@@ -4,7 +4,7 @@ from fastapi import FastAPI
 
 from helios.api.routes import router
 from helios.config import get_config
-from helios.runtime.client import SchedulerClient
+from helios.runtime.engine import Engine
 from helios.runtime.frontend import TextGenerator
 from helios.runtime.worker import Tokenizer
 
@@ -14,7 +14,7 @@ async def lifespan(app: FastAPI):
     config = get_config()
     app.state.generator = TextGenerator(
         Tokenizer.load(config),
-        SchedulerClient(config),
+        Engine(config),
     )
     yield
 
