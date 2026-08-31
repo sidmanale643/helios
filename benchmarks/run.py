@@ -13,8 +13,9 @@ from typing import Any
 
 import torch
 
-from helios.config import HeliosConfig, get_config
-from helios.runtime.client import SchedulerClient
+from helios.config import get_config
+from helios.runtime.engine import Engine
+from helios.runtime.frontend import TextGenerator
 from helios.runtime.types import Sampling
 from helios.runtime.worker import Tokenizer
 
@@ -42,12 +43,11 @@ PROMPTS = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Record a repeatable Helios scheduler benchmark."
+        description="Record a repeatable Helios benchmark."
     )
     parser.add_argument("--name", required=True, help="Stable name for this workload.")
     parser.add_argument("--runs", type=int, default=5, help="Measured requests after warmup.")
     parser.add_argument("--max-new-tokens", type=int, default=128)
-    parser.add_argument("--endpoint", help="Override HELIOS_SCHEDULER_ENDPOINT.")
     args = parser.parse_args()
     if args.runs < 1:
         parser.error("--runs must be at least 1")
@@ -153,35 +153,21 @@ def report(
 def main() -> None:
     args = parse_args()
     config = get_config()
-    if args.endpoint:
-        config = HeliosConfig(
-            **{**config.__dict__, "scheduler_endpoint": args.endpoint}
-        )
     tokenizer = Tokenizer.load(config)
-    client = SchedulerClient(config)
-    health = client.health()
+    generator = TextGenerator(tokenizer, Engine(config))
+    health = generator.health()
     prompt_tokens = [len(tokenizer.tokenize(prompt)) for prompt in PROMPTS]
     sampling = Sampling(temperature=0, top_p=1, max_new_tokens=args.max_new_tokens)
 
     def generate(prompt: str) -> tuple[int, float, float, list[float]]:
         started = time.perf_counter()
         prompt_ids = tokenizer.tokenize(prompt)
-        result = client.generate(
-            model_id=tokenizer.model_id,
-            model_revision=tokenizer.model_revision,
-            input_ids=prompt_ids,
-            eos_token_id=tokenizer.eos_token_id,
-            sampling=sampling,
-        )
-        if result.timing is None:
-            raise RuntimeError(
-                "Scheduler did not return token timings. Restart it with this version of Helios."
-            )
+        result = generator._generate(prompt_ids, sampling)
         return (
             len(result.output_ids),
             time.perf_counter() - started,
-            result.timing.prefill_seconds,
-            result.timing.inter_token_seconds,
+            result.prefill_seconds,
+            result.inter_token_seconds,
         )
 
     for prompt in PROMPTS:
@@ -208,7 +194,7 @@ def main() -> None:
         },
         "accelerator": accelerator(),
         "git": {"commit": git(["rev-parse", "HEAD"]), "dirty": bool(git(["status", "--porcelain"]))},
-        "model": {"id": health.model_id, "revision": health.model_revision},
+        "model": {"id": health["model"], "revision": health["model_revision"]},
         "workload": {
             "prompt_sha256": hashlib.sha256("\n".join(PROMPTS).encode()).hexdigest(),
             "prompt_tokens": prompt_tokens,
