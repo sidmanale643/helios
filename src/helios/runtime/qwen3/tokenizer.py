@@ -35,10 +35,14 @@ class Qwen3Tokenizer:
         self.eos_token_id = self.special_to_id["<|im_end|>"]
 
     def encode(self, text: str) -> list[int]:
-        prompt = (
-            f"<|im_start|>user\n{text}<|im_end|>\n"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        return self.encode_chat([("user", text)])
+
+    def encode_chat(self, messages: list[tuple[str, str]]) -> list[int]:
+        prompt = "".join(
+            f"<|im_start|>{role}\n{content}<|im_end|>\n"
+            for role, content in messages
         )
+        prompt += "<|im_start|>assistant\n<think>\n\n</think>\n\n"
         token_ids: list[int] = []
         for part in filter(None, self._special_pattern.split(prompt)):
             if part in self.special_to_id:

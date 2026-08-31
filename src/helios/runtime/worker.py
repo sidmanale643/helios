@@ -37,5 +37,8 @@ class Tokenizer:
     def tokenize(self, text: str) -> list[int]:
         return self.tokenizer.encode(text)
 
+    def tokenize_chat(self, messages: list[tuple[str, str]]) -> list[int]:
+        return self.tokenizer.encode_chat(messages)
+
     def detokenize(self, token_ids: list[int]) -> str:
         return self.tokenizer.decode(token_ids)
