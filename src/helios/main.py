@@ -1,58 +1,53 @@
+import signal
 from multiprocessing import Process, get_context
-from time import monotonic, sleep
 
 import uvicorn
 
 from helios.api.app import create_app
-from helios.config import HeliosConfig, get_config
-from helios.runtime.client import SchedulerClient, SchedulerUnavailable
-from helios.scheduler_main import main as scheduler_main
 
 app = create_app()
 
 
 def main() -> None:
-    config = get_config()
-    print(f"\nHelios\n  scheduler  loading {config.model_id}\n", flush=True)
-    scheduler = get_context("spawn").Process(
-        target=_run_scheduler,
-        args=(config,),
-        name="helios-scheduler",
+    server = get_context("spawn").Process(
+        target=_serve,
+        name="helios-server",
+        daemon=True,
     )
-    scheduler.start()
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.signal(signal.SIGTERM, _interrupt)
     try:
-        _wait_for_scheduler(config, scheduler)
-        print(
-            "  scheduler  ready\n"
-            "  api        starting at http://127.0.0.1:8000\n"
-            "  docs       http://127.0.0.1:8000/docs\n",
-            flush=True,
-        )
-        uvicorn.run(app, host="127.0.0.1", port=8000)
+        server.start()
+        while server.is_alive():
+            server.join(timeout=0.25)
+    except KeyboardInterrupt:
+        pass
     finally:
-        if scheduler.is_alive():
-            scheduler.terminate()
-        scheduler.join()
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        _stop(server)
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
+
+    if server.exitcode not in (0, -signal.SIGTERM):
+        raise SystemExit(server.exitcode)
 
 
-def _run_scheduler(config: HeliosConfig) -> None:
-    scheduler_main(config)
+def _serve() -> None:
+    uvicorn.run(app, host="127.0.0.1", port=8000)
 
 
-def _wait_for_scheduler(config: HeliosConfig, scheduler: Process) -> None:
-    client = SchedulerClient(config)
-    deadline = monotonic() + config.scheduler_timeout_ms / 1_000
-    while scheduler.is_alive() and monotonic() < deadline:
-        try:
-            client.health(timeout_ms=250)
-            return
-        except SchedulerUnavailable:
-            sleep(0.1)
-    if scheduler.exitcode is not None:
-        raise RuntimeError(f"Scheduler exited during startup with code {scheduler.exitcode}.")
-    raise RuntimeError(
-        f"Scheduler did not become ready within {config.scheduler_timeout_ms} ms."
-    )
+def _interrupt(signum: int, frame: object) -> None:
+    raise KeyboardInterrupt
+
+
+def _stop(process: Process) -> None:
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+    if process.is_alive():
+        process.kill()
+        process.join()
 
 
 if __name__ == "__main__":
