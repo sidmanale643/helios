@@ -10,12 +10,16 @@ from helios.runtime.qwen3.cache import KVBlockSnapshot, KVCache
 class TokenBlock:
     tokens: tuple[int, ...]
     hash: str
+    parent_hash: str
 
 
-@dataclass(frozen=True)
+@dataclass
 class CachedBlock:
     tokens: tuple[int, ...]
     snapshot: KVBlockSnapshot
+    hash: str = ""
+    parent_hash: str = ""
+    hit_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -41,7 +45,8 @@ def split_token_stream(
 
 def hash_token_blocks(blocks: Sequence[Sequence[int]]) -> list[TokenBlock]:
     hashed_blocks: list[TokenBlock] = []
-    parent_hash = b""
+    parent_digest = b""
+    parent_hex = ""
 
     for block in blocks:
         tokens = tuple(block)
@@ -54,8 +59,12 @@ def hash_token_blocks(blocks: Sequence[Sequence[int]]) -> list[TokenBlock]:
             raise ValueError("Token IDs must be non-negative integers.")
 
         payload = json.dumps(tokens, separators=(",", ":")).encode("ascii")
-        parent_hash = hashlib.sha256(parent_hash + payload).digest()
-        hashed_blocks.append(TokenBlock(tokens=tokens, hash=parent_hash.hex()))
+        digest = hashlib.sha256(parent_digest + payload).digest()
+        hashed_blocks.append(
+            TokenBlock(tokens=tokens, hash=digest.hex(), parent_hash=parent_hex)
+        )
+        parent_digest = digest
+        parent_hex = digest.hex()
 
     return hashed_blocks
 
