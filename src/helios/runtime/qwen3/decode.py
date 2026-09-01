@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import time
 
 import torch
@@ -6,6 +7,17 @@ from helios.runtime.prefix_cache import PrefixCacheHit
 from helios.runtime.qwen3.cache import KVCache
 from helios.runtime.qwen3.model import Qwen3Model
 from helios.runtime.types import Sampling
+
+
+@dataclass
+class DecodeResult:
+    output_ids: list[int]
+    finish_reason: str
+    prefill_seconds: float
+    inter_token_seconds: list[float]
+    restore_seconds: float
+    restored_tokens: int
+    cache: KVCache
 
 
 class Decoder:
@@ -20,7 +32,7 @@ class Decoder:
         *,
         max_total_tokens: int,
         prefix_hit: PrefixCacheHit | None = None,
-    ) -> tuple[list[int], str, dict[str, float | list[float]], KVCache]:
+    ) -> DecodeResult:
         capacity = len(input_ids) + sampling.max_new_tokens
         if capacity > max_total_tokens:
             raise ValueError(
@@ -46,13 +58,17 @@ class Decoder:
             if len(cached_tokens) == len(input_ids):
                 cached_blocks = cached_blocks[:-1]
 
+        restore_started = time.perf_counter()
         cache.restore_blocks(tuple(block.snapshot for block in cached_blocks))
+        restore_seconds = time.perf_counter() - restore_started
+        restored_tokens = cache.length
         token_tensor = torch.tensor(
             input_ids[cache.length :], device=self.device
         ).unsqueeze(0)
         generated: list[int] = []
         inter_token_seconds: list[float] = []
         finish_reason = "length"
+        prefill_seconds = 0.0
         self.model.eval()
         with torch.inference_mode():
             self._synchronize()
@@ -75,14 +91,14 @@ class Decoder:
                     self._synchronize()
                     started = time.perf_counter()
                     logits = self.model(next_token, cache=cache)[:, -1, :]
-        return (
-            generated,
-            finish_reason,
-            {
-                "prefill_seconds": prefill_seconds,
-                "inter_token_seconds": inter_token_seconds,
-            },
-            cache,
+        return DecodeResult(
+            output_ids=generated,
+            finish_reason=finish_reason,
+            prefill_seconds=prefill_seconds,
+            inter_token_seconds=inter_token_seconds,
+            restore_seconds=restore_seconds,
+            restored_tokens=restored_tokens,
+            cache=cache,
         )
 
     @property
