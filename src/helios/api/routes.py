@@ -9,6 +9,7 @@ from helios.api.deps import get_generator
 from helios.api.types import (
     ChatCompletionChoice,
     ChatCompletionMessage,
+    ChatCompletionPromptTokensDetails,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionUsage,
@@ -64,5 +65,8 @@ async def chat_completions(
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
             total_tokens=result.prompt_tokens + result.completion_tokens,
+            prompt_tokens_details=ChatCompletionPromptTokensDetails(
+                cached_tokens=result.cached_tokens,
+            ),
         ),
     )

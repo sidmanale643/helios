@@ -75,7 +75,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 The response uses the OpenAI chat-completion shape and includes one assistant
-choice plus prompt, completion, and total token counts.
+choice plus prompt, completion, and total token counts. Reused prefix-cache
+tokens are reported in `usage.prompt_tokens_details.cached_tokens`.
 
 Supported request fields:
 

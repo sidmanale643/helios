@@ -42,10 +42,15 @@ class ChatCompletionChoice(BaseModel):
     finish_reason: Literal["stop", "length"]
 
 
+class ChatCompletionPromptTokensDetails(BaseModel):
+    cached_tokens: int
+
+
 class ChatCompletionUsage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    prompt_tokens_details: ChatCompletionPromptTokensDetails
 
 
 class ChatCompletionResponse(BaseModel):

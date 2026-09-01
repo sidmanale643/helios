@@ -12,6 +12,7 @@ class ChatGeneration:
     finish_reason: str
     prompt_tokens: int
     completion_tokens: int
+    cached_tokens: int = 0
 
 
 class TextGenerator:
@@ -46,6 +47,7 @@ class TextGenerator:
             finish_reason=result.finish_reason,
             prompt_tokens=len(input_ids),
             completion_tokens=len(result.output_ids),
+            cached_tokens=result.prefix.restored_tokens,
         )
 
     @property
