@@ -140,6 +140,13 @@ class PrefixCache:
         self.block_size = block_size
         self._blocks: dict[str, CachedBlock] = {}
 
+    def __len__(self) -> int:
+        return len(self._blocks)
+
+    @property
+    def token_count(self) -> int:
+        return sum(len(block.tokens) for block in self._blocks.values())
+
     def get(self, block_hash: str) -> CachedBlock | None:
         return self._blocks.get(block_hash)
 
