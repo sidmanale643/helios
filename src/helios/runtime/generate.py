@@ -1,5 +1,5 @@
-from dataclasses import dataclass
 import time
+from dataclasses import dataclass
 
 from helios.runtime.check import CacheCapacity
 from helios.runtime.prefix_cache import (
