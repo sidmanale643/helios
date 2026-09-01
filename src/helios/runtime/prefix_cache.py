@@ -177,6 +177,19 @@ class PrefixCache:
             self._blocks[block.hash] = CachedBlock(
                 tokens=block.tokens,
                 snapshot=cache.snapshot_block(start, end),
+                hash=block.hash,
+                parent_hash=block.parent_hash,
             )
             stored += 1
         return stored
+
+    def blocks(self) -> list[PrefixBlockInfo]:
+        return [
+            PrefixBlockInfo(
+                hash=block.hash or key,
+                parent_hash=block.parent_hash,
+                token_count=len(block.tokens),
+                hit_count=block.hit_count,
+            )
+            for key, block in self._blocks.items()
+        ]
