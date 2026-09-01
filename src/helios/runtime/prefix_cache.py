@@ -107,6 +107,32 @@ def build_token_blocks(token_ids: Sequence[int], block_size: int) -> list[TokenB
     return hash_token_blocks(split_token_stream(token_ids, block_size))
 
 
+def describe_prompt_blocks(
+    token_ids: Sequence[int],
+    block_size: int,
+    hit: PrefixCacheHit | None,
+) -> tuple[PromptBlockView, ...]:
+    hit_blocks = 0 if hit is None else len(hit.blocks)
+    views: list[PromptBlockView] = []
+    for index, block in enumerate(build_token_blocks(token_ids, block_size)):
+        if len(block.tokens) != block_size:
+            status = "partial"
+        elif index < hit_blocks:
+            status = "hit"
+        else:
+            status = "miss"
+        views.append(
+            PromptBlockView(
+                index=index,
+                token_count=len(block.tokens),
+                hash=block.hash,
+                parent_hash=block.parent_hash,
+                status=status,
+            )
+        )
+    return tuple(views)
+
+
 class PrefixCache:
     def __init__(self, block_size: int) -> None:
         if block_size < 1:
@@ -125,6 +151,7 @@ class PrefixCache:
             cached = self._blocks.get(block.hash)
             if cached is None:
                 break
+            cached.hit_count += 1
             matched.append(cached)
         return PrefixCacheHit(tuple(matched)) if matched else None
 
