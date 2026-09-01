@@ -15,6 +15,20 @@ class Engine:
         self.generator = Generator(loaded.model, loaded.cache)
         self._generation_lock = Lock()
 
+    def prefix_cache_snapshot(self) -> dict[str, object]:
+        with self._generation_lock:
+            cache = self.generator.prefix_cache
+            blocks = cache.blocks()
+            return {
+                "block_size": cache.block_size,
+                "occupied_blocks": len(blocks),
+                "cached_tokens": cache.token_count,
+                "memory_bytes": cache.memory_bytes,
+                "max_blocks": None,
+                "max_memory_bytes": None,
+                "blocks": [block.as_dict() for block in blocks],
+            }
+
     def run(
         self,
         input_ids: list[int],

@@ -55,6 +55,7 @@ class PrefixBlockInfo:
     parent_hash: str
     token_count: int
     hit_count: int
+    memory_bytes: int
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -62,6 +63,7 @@ class PrefixBlockInfo:
             "parent_hash": self.parent_hash,
             "token_count": self.token_count,
             "hit_count": self.hit_count,
+            "memory_bytes": self.memory_bytes,
         }
 
 
@@ -147,6 +149,12 @@ class PrefixCache:
     def token_count(self) -> int:
         return sum(len(block.tokens) for block in self._blocks.values())
 
+    @property
+    def memory_bytes(self) -> int:
+        return sum(
+            self._snapshot_bytes(block.snapshot) for block in self._blocks.values()
+        )
+
     def get(self, block_hash: str) -> CachedBlock | None:
         return self._blocks.get(block_hash)
 
@@ -190,6 +198,15 @@ class PrefixCache:
                 parent_hash=block.parent_hash,
                 token_count=len(block.tokens),
                 hit_count=block.hit_count,
+                memory_bytes=self._snapshot_bytes(block.snapshot),
             )
             for key, block in self._blocks.items()
         ]
+
+    @staticmethod
+    def _snapshot_bytes(snapshot: KVBlockSnapshot) -> int:
+        return sum(
+            tensor.numel() * tensor.element_size()
+            for layer in snapshot.layers
+            for tensor in (layer.keys, layer.values)
+        )

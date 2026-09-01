@@ -27,6 +27,11 @@ async def health(
     return await run_in_threadpool(generator.health)
 
 
+@router.get("/internal/cache")
+async def prefix_cache_state(generator: GeneratorDependency) -> dict[str, object]:
+    return await run_in_threadpool(generator.engine.prefix_cache_snapshot)
+
+
 @router.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(
     payload: ChatCompletionRequest,
