@@ -1,6 +1,8 @@
 import hashlib
 import json
-from collections.abc import Sequence
+import math
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from helios.runtime.qwen3.cache import KVBlockSnapshot, KVCache
@@ -20,6 +22,7 @@ class CachedBlock:
     hash: str = ""
     parent_hash: str = ""
     hit_count: int = 0
+    expires_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -136,29 +139,44 @@ def describe_prompt_blocks(
 
 
 class PrefixCache:
-    def __init__(self, block_size: int) -> None:
+    def __init__(
+        self,
+        block_size: int,
+        ttl_seconds: float = 300.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         if block_size < 1:
             raise ValueError("block_size must be at least 1.")
+        if not math.isfinite(ttl_seconds) or ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be finite and greater than 0.")
         self.block_size = block_size
+        self.ttl_seconds = ttl_seconds
+        self._clock = clock
         self._blocks: dict[str, CachedBlock] = {}
 
     def __len__(self) -> int:
+        self._purge_expired(self._clock())
         return len(self._blocks)
 
     @property
     def token_count(self) -> int:
+        self._purge_expired(self._clock())
         return sum(len(block.tokens) for block in self._blocks.values())
 
     @property
     def memory_bytes(self) -> int:
+        self._purge_expired(self._clock())
         return sum(
             self._snapshot_bytes(block.snapshot) for block in self._blocks.values()
         )
 
     def get(self, block_hash: str) -> CachedBlock | None:
+        self._purge_expired(self._clock())
         return self._blocks.get(block_hash)
 
     def longest_prefix(self, token_ids: Sequence[int]) -> PrefixCacheHit | None:
+        now = self._clock()
+        self._purge_expired(now)
         matched: list[CachedBlock] = []
         for block in build_token_blocks(token_ids, self.block_size):
             if len(block.tokens) != self.block_size:
@@ -167,10 +185,13 @@ class PrefixCache:
             if cached is None:
                 break
             cached.hit_count += 1
+            cached.expires_at = now + self.ttl_seconds
             matched.append(cached)
         return PrefixCacheHit(tuple(matched)) if matched else None
 
     def store_completed_blocks(self, token_ids: Sequence[int], cache: KVCache) -> int:
+        now = self._clock()
+        self._purge_expired(now)
         completed_length = len(token_ids) // self.block_size * self.block_size
         if completed_length > cache.length:
             raise ValueError("KV cache has not processed every completed token block.")
@@ -187,11 +208,13 @@ class PrefixCache:
                 snapshot=cache.snapshot_block(start, end),
                 hash=block.hash,
                 parent_hash=block.parent_hash,
+                expires_at=now + self.ttl_seconds,
             )
             stored += 1
         return stored
 
     def blocks(self) -> list[PrefixBlockInfo]:
+        self._purge_expired(self._clock())
         return [
             PrefixBlockInfo(
                 hash=block.hash or key,
@@ -202,6 +225,15 @@ class PrefixCache:
             )
             for key, block in self._blocks.items()
         ]
+
+    def _purge_expired(self, now: float) -> None:
+        expired = [
+            block_hash
+            for block_hash, block in self._blocks.items()
+            if block.expires_at <= now
+        ]
+        for block_hash in expired:
+            del self._blocks[block_hash]
 
     @staticmethod
     def _snapshot_bytes(snapshot: KVBlockSnapshot) -> int:

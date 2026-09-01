@@ -46,10 +46,18 @@ class GenerationResult:
 
 
 class Generator:
-    def __init__(self, model: Qwen3Model, cache: CacheCapacity) -> None:
+    def __init__(
+        self,
+        model: Qwen3Model,
+        cache: CacheCapacity,
+        prefix_cache_ttl_seconds: float = 300.0,
+    ) -> None:
         self.decoder = Decoder(model)
         self.cache = cache
-        self.prefix_cache = PrefixCache(block_size=PREFIX_CACHE_BLOCK_SIZE)
+        self.prefix_cache = PrefixCache(
+            block_size=PREFIX_CACHE_BLOCK_SIZE,
+            ttl_seconds=prefix_cache_ttl_seconds,
+        )
 
     def run(
         self,

@@ -1,3 +1,4 @@
+import math
 import os
 from dataclasses import dataclass
 
@@ -11,6 +12,7 @@ class HeliosConfig:
     model_revision: str | None = None
     weight_headroom_ratio: float = 0.20
     kv_cache_headroom_ratio: float = 0.20
+    prefix_cache_ttl_seconds: float = 300.0
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -19,6 +21,13 @@ class HeliosConfig:
         ):
             if not 0 <= value < 1:
                 raise ValueError(f"{name} must be at least 0 and less than 1.")
+        if (
+            not math.isfinite(self.prefix_cache_ttl_seconds)
+            or self.prefix_cache_ttl_seconds <= 0
+        ):
+            raise ValueError(
+                "prefix_cache_ttl_seconds must be finite and greater than 0."
+            )
 
 
 def get_config() -> HeliosConfig:
@@ -30,5 +39,8 @@ def get_config() -> HeliosConfig:
         weight_headroom_ratio=float(os.getenv("HELIOS_WEIGHT_HEADROOM_RATIO", "0.20")),
         kv_cache_headroom_ratio=float(
             os.getenv("HELIOS_KV_CACHE_HEADROOM_RATIO", "0.20")
+        ),
+        prefix_cache_ttl_seconds=float(
+            os.getenv("HELIOS_PREFIX_CACHE_TTL_SECONDS", "300")
         ),
     )

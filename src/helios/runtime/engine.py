@@ -12,7 +12,11 @@ class Engine:
         self.model_id = config.model_id
         self.model_revision = loaded.model_revision
         self.report = loaded.report
-        self.generator = Generator(loaded.model, loaded.cache)
+        self.generator = Generator(
+            loaded.model,
+            loaded.cache,
+            prefix_cache_ttl_seconds=config.prefix_cache_ttl_seconds,
+        )
         self._generation_lock = Lock()
 
     def prefix_cache_snapshot(self) -> dict[str, object]:

@@ -157,8 +157,10 @@ Helios loads a local `.env` file automatically.
 | `HF_TOKEN` / `HF_API_KEY` | unset | Hugging Face authentication. |
 | `HELIOS_WEIGHT_HEADROOM_RATIO` | `0.20` | Additional free-memory requirement before weight loading. |
 | `HELIOS_KV_CACHE_HEADROOM_RATIO` | `0.20` | Activation headroom retained when sizing the KV cache. |
+| `HELIOS_PREFIX_CACHE_TTL_SECONDS` | `300` | Sliding lifetime of each cached prompt block; a cache hit refreshes it. |
 
 Both headroom ratios must be at least `0` and less than `1`.
+The prefix-cache TTL must be finite and greater than `0`.
 
 ## Benchmarks
 
@@ -197,7 +199,7 @@ run_batch.py             # Direct Python example
 Helios deliberately keeps the serving design small. It does not currently
 provide continuous batching, streaming, paged attention, quantization,
 multi-model serving, distributed execution, optimized custom kernels, or a
-bounded prefix-cache policy.
+capacity-bounded prefix-cache policy.
 
 The goal is to make each inference mechanism understandable, verify it against
 a simple baseline, and measure the effect before adding the next optimization.
