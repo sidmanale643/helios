@@ -31,6 +31,40 @@ class PrefixCacheHit:
         return sum(block.snapshot.length for block in self.blocks)
 
 
+@dataclass(frozen=True)
+class PromptBlockView:
+    index: int
+    token_count: int
+    hash: str
+    parent_hash: str
+    status: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "index": self.index,
+            "token_count": self.token_count,
+            "hash": self.hash,
+            "parent_hash": self.parent_hash,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
+class PrefixBlockInfo:
+    hash: str
+    parent_hash: str
+    token_count: int
+    hit_count: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "hash": self.hash,
+            "parent_hash": self.parent_hash,
+            "token_count": self.token_count,
+            "hit_count": self.hit_count,
+        }
+
+
 def split_token_stream(
     token_ids: Sequence[int], block_size: int
 ) -> list[tuple[int, ...]]:
