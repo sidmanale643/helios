@@ -170,6 +170,9 @@ class PrefixCache:
             self._snapshot_bytes(block.snapshot) for block in self._blocks.values()
         )
 
+    def clear(self) -> None:
+        self._blocks.clear()
+
     def get(self, block_hash: str) -> CachedBlock | None:
         self._purge_expired(self._clock())
         return self._blocks.get(block_hash)
