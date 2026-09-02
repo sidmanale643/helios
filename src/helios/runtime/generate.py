@@ -50,9 +50,10 @@ class Generator:
         self,
         model: Qwen3Model,
         cache: CacheCapacity,
+        torch_compile: bool = True,
         prefix_cache_ttl_seconds: float = 300.0,
     ) -> None:
-        self.decoder = Decoder(model)
+        self.decoder = Decoder(model, torch_compile=torch_compile)
         self.cache = cache
         self.prefix_cache = PrefixCache(
             block_size=PREFIX_CACHE_BLOCK_SIZE,

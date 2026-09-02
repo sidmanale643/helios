@@ -10,6 +10,7 @@ class HeliosConfig:
     model_id: str
     hf_token: str | None
     model_revision: str | None = None
+    torch_compile: bool = True
     weight_headroom_ratio: float = 0.20
     kv_cache_headroom_ratio: float = 0.20
     prefix_cache_ttl_seconds: float = 300.0
@@ -36,6 +37,8 @@ def get_config() -> HeliosConfig:
         model_id=os.getenv("HELIOS_MODEL_ID", "Qwen/Qwen3-4B"),
         hf_token=os.getenv("HF_TOKEN") or os.getenv("HF_API_KEY"),
         model_revision=os.getenv("HELIOS_MODEL_REVISION") or None,
+        torch_compile=os.getenv("HELIOS_TORCH_COMPILE", "1").lower()
+        not in {"0", "false", "no"},
         weight_headroom_ratio=float(os.getenv("HELIOS_WEIGHT_HEADROOM_RATIO", "0.20")),
         kv_cache_headroom_ratio=float(
             os.getenv("HELIOS_KV_CACHE_HEADROOM_RATIO", "0.20")

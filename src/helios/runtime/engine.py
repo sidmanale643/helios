@@ -15,6 +15,7 @@ class Engine:
         self.generator = Generator(
             loaded.model,
             loaded.cache,
+            torch_compile=config.torch_compile,
             prefix_cache_ttl_seconds=config.prefix_cache_ttl_seconds,
         )
         self._generation_lock = Lock()

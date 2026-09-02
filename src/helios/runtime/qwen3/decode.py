@@ -21,8 +21,11 @@ class DecodeResult:
 
 
 class Decoder:
-    def __init__(self, model: Qwen3Model) -> None:
+    def __init__(self, model: Qwen3Model, *, torch_compile: bool = True) -> None:
         self.model = model
+        self._forward = (
+            torch.compile(model, dynamic=True) if torch_compile else model
+        )
 
     def generate(
         self,
@@ -73,7 +76,7 @@ class Decoder:
         with torch.inference_mode():
             self._synchronize()
             started = time.perf_counter()
-            logits = self.model(token_tensor, cache=cache)[:, -1, :]
+            logits = self._forward(token_tensor, cache=cache)[:, -1, :]
             for index in range(sampling.max_new_tokens):
                 next_token = self._sample(logits, sampling)
                 self._synchronize()
@@ -90,7 +93,7 @@ class Decoder:
                 if index + 1 < sampling.max_new_tokens:
                     self._synchronize()
                     started = time.perf_counter()
-                    logits = self.model(next_token, cache=cache)[:, -1, :]
+                    logits = self._forward(next_token, cache=cache)[:, -1, :]
         return DecodeResult(
             output_ids=generated,
             finish_reason=finish_reason,
