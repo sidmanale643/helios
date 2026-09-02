@@ -137,13 +137,22 @@ def run_request(generator: TextGenerator, spec: RequestSpec) -> dict[str, object
         max_new_tokens=spec.workload.max_new_tokens,
     )
     started = time.perf_counter()
-    chat = generator.run_chat(list(spec.messages), sampling)
+    tokenize_started = time.perf_counter()
+    input_ids = generator.tokenizer.tokenize_chat(list(spec.messages))
+    tokenize_seconds = time.perf_counter() - tokenize_started
+    result = generator.engine.run(
+        input_ids,
+        generator.tokenizer.eos_token_id,
+        sampling,
+    )
+    detokenize_started = time.perf_counter()
+    generator.tokenizer.detokenize(result.output_ids)
+    detokenize_seconds = time.perf_counter() - detokenize_started
     end_to_end = time.perf_counter() - started
-    result = chat.result
     decode_seconds = sum(result.inter_token_seconds)
     generation_seconds = result.prefill_seconds + decode_seconds
     time_to_first_token = (
-        chat.tokenize_seconds
+        tokenize_seconds
         + result.queue_seconds
         + result.prefix_lookup_seconds
         + result.restore_seconds
@@ -152,9 +161,9 @@ def run_request(generator: TextGenerator, spec: RequestSpec) -> dict[str, object
     return {
         "workload": spec.workload.name,
         "phase": spec.phase,
-        "prompt_tokens": chat.prompt_tokens,
-        "output_tokens": chat.completion_tokens,
-        "finish_reason": chat.finish_reason,
+        "prompt_tokens": len(input_ids),
+        "output_tokens": len(result.output_ids),
+        "finish_reason": result.finish_reason,
         "output_sha256": hashlib.sha256(
             json.dumps(result.output_ids, separators=(",", ":")).encode()
         ).hexdigest(),
@@ -163,22 +172,22 @@ def run_request(generator: TextGenerator, spec: RequestSpec) -> dict[str, object
         "prefill_seconds": result.prefill_seconds,
         "decode_seconds": decode_seconds,
         "inter_token_seconds": result.inter_token_seconds,
-        "tokenize_seconds": chat.tokenize_seconds,
-        "detokenize_seconds": chat.detokenize_seconds,
+        "tokenize_seconds": tokenize_seconds,
+        "detokenize_seconds": detokenize_seconds,
         "prefix_lookup_seconds": result.prefix_lookup_seconds,
         "restore_seconds": result.restore_seconds,
         "store_seconds": result.store_seconds,
         "prefix_hit_tokens": result.prefix.hit_tokens,
         "restored_tokens": result.prefix.restored_tokens,
         "stored_blocks": result.prefix.stored_blocks,
-        "cache_hit_rate": result.prefix.restored_tokens / chat.prompt_tokens,
+        "cache_hit_rate": result.prefix.restored_tokens / len(input_ids),
         "generation_tokens_per_second": (
-            chat.completion_tokens / generation_seconds
+            len(result.output_ids) / generation_seconds
             if generation_seconds > 0
             else None
         ),
         "end_to_end_tokens_per_second": (
-            chat.completion_tokens / end_to_end if end_to_end > 0 else None
+            len(result.output_ids) / end_to_end if end_to_end > 0 else None
         ),
     }
 
