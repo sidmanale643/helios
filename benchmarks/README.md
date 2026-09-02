@@ -1,37 +1,59 @@
-# Benchmarks
+# Fixed benchmark suite
 
-Record a repeatable decode benchmark:
-
-```bash
-uv run python benchmarks/run.py --name decode-128
-```
-
-The first request warms the model and is excluded. By default, the benchmark
-runs five measured requests against the fixed prompt and reports:
-
-- End-to-end latency: CPU tokenization and GPU/Metal execution.
-- Time to first token: prompt prefill plus selection of the first output token
-  on the model device.
-- Inter-token latency: the median time to produce each subsequent output token
-  on the model device.
-- Throughput: generated output tokens divided by median end-to-end latency.
-
-Each run creates a JSON file in `benchmarks/results/`. It includes the model
-revision, commit and dirty state, hostname, platform, detected accelerator,
-workload, individual timings, and aggregate metrics. The command prints the
-change from the most recent matching workload. It compares the same host and
-accelerator first; when none exists, it falls back to the most recent result
-from another machine and labels that comparison.
-
-Keep the benchmark name and options unchanged when comparing implementation
-changes. Use a new name when changing the workload:
+Run this suite before and after every major inference change:
 
 ```bash
-uv run python benchmarks/run.py --name decode-128 --runs 10
-uv run python benchmarks/run.py --name decode-256 --max-new-tokens 256
+uv run python benchmarks/run.py --label baseline
+uv run python benchmarks/run.py --label kv-cache
+uv run python benchmarks/run.py --label prefix-cache
+uv run python benchmarks/run.py --label torch-compile
 ```
 
-Results are versioned with the code so benchmarks run on another machine can
-be compared after syncing the repository. The script fails without writing a
-result if a measured request produces a different number of tokens than the
-others.
+The label describes the implementation being measured. It does not change the
+workload. Keep the same model, model revision, machine, accelerator, environment,
+and default `--runs 3` when comparing results.
+
+The suite loads the model once, warms every request shape outside the measurement,
+then runs four fixed workloads:
+
+| Workload | Shape | What it isolates |
+| --- | --- | --- |
+| `prefill-long` | Long prompt, 8 output tokens | Attention and prompt-processing changes |
+| `decode-long` | Short 2,000-word essay request, up to 2,048 output tokens | KV cache and token-by-token decode changes |
+| `balanced` | Medium prompt, up to 64 output tokens | Typical mixed generation behavior |
+| `agent-prefix` | Growing simulated tool-agent transcript, 48 output tokens per step | Prefix reuse across an agent loop |
+
+Every uncached or cold repetition starts with a fresh prefix cache and fails if
+Helios restores any tokens. Each `agent-prefix` repetition then appends simulated
+assistant tool calls and simulated tool results to the same transcript in order:
+customer lookup, order listing, and order details. No tool is actually invoked.
+Every appended step must restore cached prefix tokens. The cache resets before the
+next repetition so earlier runs cannot bias later samples.
+
+The terminal table reports exact input/output token counts, end-to-end latency,
+time to first token (TTFT), inter-token latency (ITL), generation throughput, and
+restored-token cache hit rate for every workload/phase. The JSON result additionally
+records:
+
+- End-to-end, tokenization, detokenization, lookup, restore, prefill, decode, and
+  cache-store timings.
+- Prompt/output token counts, finish reason, restored and matched prefix tokens,
+  stored block count, and request-level cache hits.
+- Git commit and dirty state, model revision, Python and PyTorch versions, host,
+  platform, and accelerator.
+- The complete suite definition and its SHA-256 identity.
+
+Results are written to `benchmarks/results/`. A run compares itself with the latest
+result having the same suite hash and model revision. Same-machine and
+same-accelerator results are preferred; cross-machine comparisons are labeled.
+
+`--runs` exists for noisier machines, but it is part of the suite identity. A run
+with a different repetition count establishes a separate baseline:
+
+```bash
+uv run python benchmarks/run.py --label baseline-long --runs 10
+```
+
+Do not edit prompts or output limits between an optimization's before and after
+runs. If the fixed suite intentionally changes, increment `SUITE_VERSION` in
+`benchmarks/suite.py`; the new hash will prevent comparison with old results.
