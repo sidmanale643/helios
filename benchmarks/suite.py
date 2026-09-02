@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-SUITE_VERSION = 2
+SUITE_VERSION = 3
 
 PREFILL_CONTEXT = """
 Northwind Health operates twelve neighborhood clinics. Each clinic publishes appointment
@@ -22,7 +22,11 @@ booking from a failed notification. The plan must include rollout order, measura
 criteria, rollback signals, ownership, and a practical way to test traffic spikes before release.
 """.strip()
 
-BALANCED_CONTEXT = """
+PREFILL_INPUT = "\n\n".join(PREFILL_CONTEXT for _ in range(5)) + (
+    "\n\nName the first action only."
+)
+
+BALANCED_INPUT = """
 A regional library system has eight branches, a shared catalog, self-checkout kiosks, and a
 mobile app. Patrons report that newly returned books sometimes remain unavailable for several
 minutes, while staff occasionally see the same hold assigned twice during busy evenings. The
@@ -63,89 +67,86 @@ private notes belonging to another tenant. A tool returning no records is a vali
 a timeout, authentication error, rate limit, or malformed response is a provider failure.
 """.strip()
 
-AGENT_USER = "Find open orders for customer ana@example.test in tenant northwind."
-LOOKUP_CALL = """SIMULATED TOOL CALL
+AGENT_INPUT = "Find open orders for customer ana@example.test in tenant northwind."
+LOOKUP_CALL = """
 {"name":"lookup_customer","arguments":{"tenant_id":"northwind","email":"ana@example.test"}}"""
-LOOKUP_RESULT = """SIMULATED TOOL RESULT: lookup_customer
+LOOKUP_RESULT = """
 {"status":"ok","customer":{"customer_id":"cus_1042","email":"ana@example.test"}}"""
-ORDERS_CALL = """SIMULATED TOOL CALL
+ORDERS_CALL = """
 {"name":"list_orders","arguments":{"tenant_id":"northwind","customer_id":"cus_1042","status":"open","limit":10}}"""
-ORDERS_RESULT = """SIMULATED TOOL RESULT: list_orders
+ORDERS_RESULT = """
 {"status":"ok","orders":[{"order_id":"ord_731","payment_state":"paid","fulfillment_state":"processing"}],"next_cursor":null}"""
-ORDER_CALL = """SIMULATED TOOL CALL
+ORDER_CALL = """
 {"name":"get_order","arguments":{"tenant_id":"northwind","order_id":"ord_731"}}"""
-ORDER_RESULT = """SIMULATED TOOL RESULT: get_order
+ORDER_RESULT = """
 {"status":"ok","order":{"order_id":"ord_731","version":4,"payment_state":"paid","fulfillment_state":"processing","line_items":[{"sku":"HEAT-24","quantity":1}]}}"""
+
+Message = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class ToolExchange:
+    phase: str
+    call: str
+    result: str
 
 
 @dataclass(frozen=True)
 class Workload:
     name: str
-    kind: str
     description: str
+    input: tuple[Message, ...]
     max_new_tokens: int
+    tool_exchanges: tuple[ToolExchange, ...] = ()
+
+
+WORKLOADS = (
+    Workload(
+        "prefill-long",
+        "Long input with a short output.",
+        (("user", PREFILL_INPUT),),
+        8,
+    ),
+    Workload(
+        "decode-long",
+        "Short input with a long output.",
+        (("user", "Write a 2,000-word essay about how cities can prepare for extreme heat. Continue with concrete examples until the output limit."),),
+        2_048,
+    ),
+    Workload(
+        "balanced",
+        "Medium input with a medium output.",
+        (("user", BALANCED_INPUT),),
+        64,
+    ),
+    Workload(
+        "agent-prefix",
+        "A growing transcript with simulated tool calls and results.",
+        (("system", AGENT_SYSTEM), ("user", AGENT_INPUT)),
+        48,
+        (
+            ToolExchange("after-customer", LOOKUP_CALL, LOOKUP_RESULT),
+            ToolExchange("after-orders", ORDERS_CALL, ORDERS_RESULT),
+            ToolExchange("after-order", ORDER_CALL, ORDER_RESULT),
+        ),
+    ),
+)
 
 
 @dataclass(frozen=True)
 class RequestSpec:
     workload: Workload
     phase: str
-    messages: tuple[tuple[str, str], ...]
-
-
-WORKLOADS = (
-    Workload("prefill-long", "prefill", "Long context with a short answer.", 8),
-    Workload("decode-long", "decode", "Short prompt with a long continuation.", 2_048),
-    Workload("balanced", "balanced", "Medium context and medium continuation.", 64),
-    Workload(
-        "agent-prefix",
-        "prefix",
-        "Growing simulated tool-agent transcript measured in order.",
-        48,
-    ),
-)
+    messages: tuple[Message, ...]
 
 
 def requests_for(workload: Workload) -> tuple[RequestSpec, ...]:
-    if workload.kind == "prefill":
-        context = "\n\n".join(PREFILL_CONTEXT for _ in range(5))
-        return (
-            RequestSpec(
-                workload,
-                "uncached",
-                (("user", f"{context}\n\nName the first action only."),),
-            ),
-        )
-    if workload.kind == "decode":
-        return (
-            RequestSpec(
-                workload,
-                "uncached",
-                (
-                    (
-                        "user",
-                        (
-                            "Write a 2,000-word essay about how cities can prepare for extreme "
-                            "heat. Continue with concrete examples until the output limit."
-                        ),
-                    ),
-                ),
-            ),
-        )
-    if workload.kind == "balanced":
-        return (RequestSpec(workload, "uncached", (("user", BALANCED_CONTEXT),)),)
-    messages: tuple[tuple[str, str], ...] = (
-        ("system", AGENT_SYSTEM),
-        ("user", AGENT_USER),
-    )
-    steps = [("cold", messages)]
-    for phase, appended in (
-        ("after-customer", (("assistant", LOOKUP_CALL), ("tool", LOOKUP_RESULT))),
-        ("after-orders", (("assistant", ORDERS_CALL), ("tool", ORDERS_RESULT))),
-        ("after-order", (("assistant", ORDER_CALL), ("tool", ORDER_RESULT))),
-    ):
-        messages += appended
-        steps.append((phase, messages))
-    return tuple(
-        RequestSpec(workload, phase, transcript) for phase, transcript in steps
-    )
+    if not workload.tool_exchanges:
+        return (RequestSpec(workload, "uncached", workload.input),)
+
+    messages = workload.input
+    requests = [RequestSpec(workload, "cold", messages)]
+    for exchange in workload.tool_exchanges:
+        messages += (("assistant", exchange.call), ("tool", exchange.result))
+        requests.append(RequestSpec(workload, exchange.phase, messages))
+    return tuple(requests)
