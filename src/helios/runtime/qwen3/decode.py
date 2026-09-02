@@ -24,7 +24,7 @@ class Decoder:
     def __init__(self, model: Qwen3Model, *, torch_compile: bool = True) -> None:
         self.model = model
         self._forward = (
-            torch.compile(model, dynamic=True) if torch_compile else model
+            torch.compile(model, dynamic=True, fullgraph=True) if torch_compile else model
         )
 
     def generate(
