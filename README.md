@@ -155,7 +155,7 @@ Helios loads a local `.env` file automatically.
 | `HELIOS_MODEL_ID` | `Qwen/Qwen3-4B` | Model repository. No other architecture is currently supported. |
 | `HELIOS_MODEL_REVISION` | latest resolved snapshot | Pins model and tokenizer files to a Hugging Face revision. |
 | `HF_TOKEN` / `HF_API_KEY` | unset | Hugging Face authentication. |
-| `HELIOS_TORCH_COMPILE` | `1` | Compiles the model with dynamic shapes on first use. Set to `0`, `false`, or `no` to disable it. |
+| `HELIOS_TORCH_COMPILE` | `0` | Set to `1`, `true`, or `yes` to compile the model with dynamic shapes on first use. |
 | `HELIOS_WEIGHT_HEADROOM_RATIO` | `0.20` | Additional free-memory requirement before weight loading. |
 | `HELIOS_KV_CACHE_HEADROOM_RATIO` | `0.20` | Activation headroom retained when sizing the KV cache. |
 | `HELIOS_PREFIX_CACHE_TTL_SECONDS` | `300` | Sliding lifetime of each cached prompt block; a cache hit refreshes it. |

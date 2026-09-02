@@ -50,7 +50,7 @@ class Generator:
         self,
         model: Qwen3Model,
         cache: CacheCapacity,
-        torch_compile: bool = True,
+        torch_compile: bool = False,
         prefix_cache_ttl_seconds: float = 300.0,
     ) -> None:
         self.decoder = Decoder(model, torch_compile=torch_compile)
