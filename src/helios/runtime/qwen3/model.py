@@ -27,9 +27,11 @@ class Qwen3Model(nn.Module):
             raise ValueError(f"Qwen3-4B supports at most {self.config.context_length:,} tokens per request.")
         x = self.token_embedding(input_ids)
         tokens = x.shape[1]
-        mask = torch.triu(
-            torch.ones(end_pos, end_pos, device=x.device, dtype=torch.bool), diagonal=1
-        )[start_pos:end_pos, :end_pos].unsqueeze(0).unsqueeze(0)
+        mask = None
+        if tokens > 1:
+            query_positions = torch.arange(start_pos, end_pos, device=x.device)
+            key_positions = torch.arange(end_pos, device=x.device)
+            mask = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
         for index, block in enumerate(self.blocks):
             x = block(
                 x, mask, self.cos, self.sin,

@@ -71,7 +71,7 @@ class GroupedQueryAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        mask: torch.Tensor,
+        mask: torch.Tensor | None,
         cos: torch.Tensor,
         sin: torch.Tensor,
         *,
@@ -87,12 +87,15 @@ class GroupedQueryAttention(nn.Module):
         keys = apply_rope(self.k_norm(keys), cos, sin, start_pos=start_pos)
         if cache is not None:
             keys, values = cache.append(layer_index, keys, values)
-        keys = keys.repeat_interleave(self.group_size, dim=1)
-        values = values.repeat_interleave(self.group_size, dim=1)
-        scores = queries @ keys.transpose(2, 3)
-        scores = scores.masked_fill(mask, -torch.inf)
-        weights = torch.softmax(scores / self.head_dim**0.5, dim=-1)
-        context = (weights @ values).transpose(1, 2).reshape(batch_size, tokens, -1)
+        context = torch.nn.functional.scaled_dot_product_attention(
+            queries,
+            keys,
+            values,
+            attn_mask=mask,
+            dropout_p=0.0,
+            enable_gqa=self.group_size > 1,
+        )
+        context = context.transpose(1, 2).reshape(batch_size, tokens, -1)
         return self.output(context)
 
 
@@ -107,7 +110,7 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        mask: torch.Tensor,
+        mask: torch.Tensor | None,
         cos: torch.Tensor,
         sin: torch.Tensor,
         *,
