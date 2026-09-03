@@ -56,6 +56,15 @@ class KVCache:
             )
             for _ in range(config.n_layers)
         ]
+
+    @property
+    def memory_bytes_per_token(self) -> int:
+        return sum(
+            tensor[:, :, :1].numel() * tensor.element_size()
+            for layer in self._layers
+            for tensor in (layer.keys, layer.values)
+        )
+
     def append(self, layer: int, keys: torch.Tensor, values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if keys.shape != values.shape:
             raise ValueError("Key and value tensors must have identical shapes.")

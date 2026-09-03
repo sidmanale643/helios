@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -142,6 +143,7 @@ class PrefixCache:
     def __init__(
         self,
         block_size: int,
+        max_memory_bytes: int | None = None,
         ttl_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -149,10 +151,19 @@ class PrefixCache:
             raise ValueError("block_size must be at least 1.")
         if not math.isfinite(ttl_seconds) or ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be finite and greater than 0.")
+        if max_memory_bytes is not None and (
+            not isinstance(max_memory_bytes, int)
+            or isinstance(max_memory_bytes, bool)
+            or max_memory_bytes < 0
+        ):
+            raise ValueError("max_memory_bytes must be a non-negative integer.")
         self.block_size = block_size
+        self.max_memory_bytes = max_memory_bytes
         self.ttl_seconds = ttl_seconds
         self._clock = clock
-        self._blocks: dict[str, CachedBlock] = {}
+        self._blocks: OrderedDict[str, CachedBlock] = OrderedDict()
+        self._memory_bytes = 0
+        self._reclaimed_memory_bytes = 0
 
     def __len__(self) -> int:
         self._purge_expired(self._clock())
@@ -166,16 +177,34 @@ class PrefixCache:
     @property
     def memory_bytes(self) -> int:
         self._purge_expired(self._clock())
-        return sum(
-            self._snapshot_bytes(block.snapshot) for block in self._blocks.values()
-        )
+        return self._memory_bytes
 
     def clear(self) -> None:
+        self._reclaimed_memory_bytes += self._memory_bytes
         self._blocks.clear()
+        self._memory_bytes = 0
 
     def get(self, block_hash: str) -> CachedBlock | None:
         self._purge_expired(self._clock())
-        return self._blocks.get(block_hash)
+        block = self._blocks.get(block_hash)
+        if block is not None:
+            self._blocks.move_to_end(block_hash)
+        return block
+
+    def reserve(self, memory_bytes: int) -> int:
+        if self.max_memory_bytes is None:
+            return 0
+        if (
+            not isinstance(memory_bytes, int)
+            or isinstance(memory_bytes, bool)
+            or not 0 <= memory_bytes <= self.max_memory_bytes
+        ):
+            raise ValueError("Reserved memory must fit within the KV-cache budget.")
+        self._purge_expired(self._clock())
+        self._evict_to(self.max_memory_bytes - memory_bytes)
+        reclaimed = self._reclaimed_memory_bytes
+        self._reclaimed_memory_bytes = 0
+        return reclaimed
 
     def longest_prefix(self, token_ids: Sequence[int]) -> PrefixCacheHit | None:
         now = self._clock()
@@ -189,10 +218,17 @@ class PrefixCache:
                 break
             cached.hit_count += 1
             cached.expires_at = now + self.ttl_seconds
+            self._blocks.move_to_end(block.hash)
             matched.append(cached)
         return PrefixCacheHit(tuple(matched)) if matched else None
 
-    def store_completed_blocks(self, token_ids: Sequence[int], cache: KVCache) -> int:
+    def store_completed_blocks(
+        self,
+        token_ids: Sequence[int],
+        cache: KVCache,
+        *,
+        reserved_memory_bytes: int = 0,
+    ) -> int:
         now = self._clock()
         self._purge_expired(now)
         completed_length = len(token_ids) // self.block_size * self.block_size
@@ -200,19 +236,44 @@ class PrefixCache:
             raise ValueError("KV cache has not processed every completed token block.")
 
         blocks = build_token_blocks(token_ids[:completed_length], self.block_size)
+        available_bytes = (
+            None
+            if self.max_memory_bytes is None
+            else self.max_memory_bytes - reserved_memory_bytes
+        )
+        if available_bytes is not None and available_bytes < 0:
+            raise ValueError("Reserved memory must fit within the KV-cache budget.")
+        snapshot_bytes = cache.memory_bytes_per_token * self.block_size
+        if available_bytes is not None and snapshot_bytes > available_bytes:
+            return 0
+
         stored = 0
+        protected: set[str] = set()
         for index, block in enumerate(blocks):
             if block.hash in self._blocks:
+                protected.add(block.hash)
                 continue
+            if block.parent_hash and block.parent_hash not in self._blocks:
+                break
             start = index * self.block_size
             end = start + self.block_size
+            if available_bytes is not None and not self._evict_to(
+                available_bytes - snapshot_bytes,
+                protected_hashes=protected,
+            ):
+                break
+            if block.parent_hash and block.parent_hash not in self._blocks:
+                break
+            snapshot = cache.snapshot_block(start, end)
             self._blocks[block.hash] = CachedBlock(
                 tokens=block.tokens,
-                snapshot=cache.snapshot_block(start, end),
+                snapshot=snapshot,
                 hash=block.hash,
                 parent_hash=block.parent_hash,
                 expires_at=now + self.ttl_seconds,
             )
+            self._memory_bytes += snapshot_bytes
+            protected.add(block.hash)
             stored += 1
         return stored
 
@@ -236,7 +297,41 @@ class PrefixCache:
             if block.expires_at <= now
         ]
         for block_hash in expired:
-            del self._blocks[block_hash]
+            if block_hash in self._blocks:
+                self._remove(block_hash)
+
+    def _evict_to(
+        self,
+        target_bytes: int,
+        *,
+        protected_hashes: set[str] | None = None,
+    ) -> bool:
+        protected_hashes = protected_hashes or set()
+        while self._memory_bytes > target_bytes:
+            parent_hashes = {
+                block.parent_hash
+                for block in self._blocks.values()
+                if block.parent_hash
+            }
+            victim = next(
+                (
+                    block_hash
+                    for block_hash in self._blocks
+                    if block_hash not in protected_hashes
+                    and block_hash not in parent_hashes
+                ),
+                None,
+            )
+            if victim is None:
+                return False
+            self._remove(victim)
+        return True
+
+    def _remove(self, block_hash: str) -> None:
+        block = self._blocks.pop(block_hash)
+        memory_bytes = self._snapshot_bytes(block.snapshot)
+        self._memory_bytes -= memory_bytes
+        self._reclaimed_memory_bytes += memory_bytes
 
     @staticmethod
     def _snapshot_bytes(snapshot: KVBlockSnapshot) -> int:
