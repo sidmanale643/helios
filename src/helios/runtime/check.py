@@ -12,9 +12,13 @@ from helios.runtime.qwen3.model import Qwen3Model
 @dataclass(frozen=True)
 class CacheCapacity:
     free_bytes: int
+    device_occupied_bytes: int
     activation_headroom_bytes: int
     bytes_per_token: int
     max_tokens: int
+    kv_budget_bytes: int
+    model_occupied_bytes: int
+    warmup_peak_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -60,12 +64,35 @@ class MemoryChecker:
             fits=required_bytes <= available_bytes,
         )
 
-    def cache(self, model: Qwen3Config) -> CacheCapacity:
-        free, _ = torch.cuda.mem_get_info(self._gpu())
+    def cache(
+        self,
+        model: Qwen3Config,
+        *,
+        warmup_peak_bytes: int | None = None,
+        warmup_kv_bytes: int = 0,
+    ) -> CacheCapacity:
+        device = self._gpu()
+        free, total = torch.cuda.mem_get_info(device)
         bytes_per_token = (
             model.n_layers * 2 * model.n_kv_heads * model.head_dim * 2
         )
-        cache_bytes = int(free / (1 + self.config.kv_cache_headroom_ratio))
+        model_occupied_bytes = torch.cuda.memory_reserved(device)
+        max_gpu_bytes = math.floor(total * self.config.max_gpu_utilization)
+        if warmup_peak_bytes is None:
+            activation_headroom_bytes = free - int(
+                free / (1 + self.config.kv_cache_headroom_ratio)
+            )
+        else:
+            if warmup_peak_bytes < 0 or warmup_kv_bytes < 0:
+                raise ValueError("Warmup peak memory must be non-negative.")
+            activation_bytes = max(0, warmup_peak_bytes - warmup_kv_bytes)
+            activation_headroom_bytes = math.ceil(
+                activation_bytes * (1 + self.config.kv_cache_headroom_ratio)
+            )
+        device_occupied_bytes = total - free
+        cache_bytes = (
+            max_gpu_bytes - device_occupied_bytes - activation_headroom_bytes
+        )
         max_tokens = min(cache_bytes // bytes_per_token, model.context_length)
         if max_tokens < 1:
             raise RuntimeError(
@@ -73,9 +100,13 @@ class MemoryChecker:
             )
         return CacheCapacity(
             free_bytes=free,
-            activation_headroom_bytes=free - cache_bytes,
+            device_occupied_bytes=device_occupied_bytes,
+            activation_headroom_bytes=activation_headroom_bytes,
             bytes_per_token=bytes_per_token,
             max_tokens=max_tokens,
+            kv_budget_bytes=cache_bytes,
+            model_occupied_bytes=model_occupied_bytes,
+            warmup_peak_bytes=warmup_peak_bytes,
         )
 
     @staticmethod
