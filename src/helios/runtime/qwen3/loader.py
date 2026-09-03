@@ -29,10 +29,15 @@ class Qwen3Loader:
         checker = MemoryChecker(config)
         report = checker.weights()
         if not report.fits:
+            available_bytes = max(
+                0,
+                report.max_gpu_bytes
+                - (report.total_bytes - report.free_before_load_bytes),
+            )
             raise RuntimeError(
                 f"Refusing to load {config.model_id}: weights and headroom need "
-                f"{report.required_bytes:,} bytes; {report.free_before_load_bytes:,} "
-                "bytes are free."
+                f"{report.required_bytes:,} bytes; {available_bytes:,} bytes are "
+                "available under the GPU utilization limit."
             )
         snapshot = Path(
             snapshot_download(

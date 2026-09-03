@@ -11,11 +11,17 @@ class HeliosConfig:
     hf_token: str | None
     model_revision: str | None = None
     torch_compile: bool = False
+    max_gpu_utilization: float = 0.90
     weight_headroom_ratio: float = 0.20
     kv_cache_headroom_ratio: float = 0.20
     prefix_cache_ttl_seconds: float = 300.0
 
     def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.max_gpu_utilization)
+            or not 0 < self.max_gpu_utilization <= 1
+        ):
+            raise ValueError("max_gpu_utilization must be greater than 0 and at most 1.")
         for name, value in (
             ("weight_headroom_ratio", self.weight_headroom_ratio),
             ("kv_cache_headroom_ratio", self.kv_cache_headroom_ratio),
@@ -39,6 +45,9 @@ def get_config() -> HeliosConfig:
         model_revision=os.getenv("HELIOS_MODEL_REVISION") or None,
         torch_compile=os.getenv("HELIOS_TORCH_COMPILE", "0").lower()
         not in {"0", "false", "no"},
+        max_gpu_utilization=float(
+            os.getenv("HELIOS_MAX_GPU_UTILIZATION", "0.90")
+        ),
         weight_headroom_ratio=float(os.getenv("HELIOS_WEIGHT_HEADROOM_RATIO", "0.20")),
         kv_cache_headroom_ratio=float(
             os.getenv("HELIOS_KV_CACHE_HEADROOM_RATIO", "0.20")

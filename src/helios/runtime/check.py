@@ -1,3 +1,4 @@
+import math
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -20,6 +21,8 @@ class CacheCapacity:
 class MemoryReport:
     gpu: str
     total_bytes: int
+    max_gpu_utilization: float
+    max_gpu_bytes: int
     free_before_load_bytes: int
     weight_bytes: int
     required_bytes: int
@@ -39,18 +42,22 @@ class MemoryChecker:
     def weights(self) -> MemoryReport:
         index = self._gpu()
         free, total = torch.cuda.mem_get_info(index)
+        max_gpu_bytes = math.floor(total * self.config.max_gpu_utilization)
         with torch.device("meta"):
             model = Qwen3Model(qwen3_4b_config(self.dtype))
             weight_bytes = sum(parameter.numel() for parameter in model.parameters()) * 2
 
         required_bytes = int(weight_bytes * (1 + self.config.weight_headroom_ratio))
+        available_bytes = max(0, max_gpu_bytes - (total - free))
         return MemoryReport(
             gpu=torch.cuda.get_device_name(index),
             total_bytes=total,
+            max_gpu_utilization=self.config.max_gpu_utilization,
+            max_gpu_bytes=max_gpu_bytes,
             free_before_load_bytes=free,
             weight_bytes=weight_bytes,
             required_bytes=required_bytes,
-            fits=required_bytes <= free,
+            fits=required_bytes <= available_bytes,
         )
 
     def cache(self, model: Qwen3Config) -> CacheCapacity:
