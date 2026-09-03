@@ -154,10 +154,17 @@ flowchart LR
 
 At startup, Helios resolves one Hugging Face snapshot for both the tokenizer
 and model, checks GPU memory, loads the safetensors into the native Qwen3
-implementation, and reserves the remaining capacity for KV-cache tokens.
-When Torch compilation is enabled, startup performs one fixed balanced-prompt
-generation of four greedy tokens to compile the prefill and decode shapes, then
-clears that prompt from the prefix cache before serving requests.
+implementation, and estimates a provisional KV-cache token limit.
+Startup runs a fixed base prompt followed by an extended conversation to warm
+both cold and cached-prefix execution (and compile them when enabled). It then
+clears the prefix cache and repeats the base prompt to measure peak memory on the
+warmed cold path. Each request generates up to four greedy tokens. After cleanup,
+the warmed model residency and an activation allowance are subtracted from the
+configured GPU-memory ceiling to set one shared budget for active request KV and
+retained prefix KV. The prefix cache evicts least-recently-used blocks before a
+request or block admission would exceed that budget. No warmup prefixes remain
+when serving starts. The activation estimate covers the warmup shape, not every
+possible prompt length.
 
 For each request, the tokenizer applies the Qwen3 chat template. The engine
 looks up the longest complete cached prompt prefix, restores its per-layer K/V
@@ -175,11 +182,13 @@ Helios loads a local `.env` file automatically.
 | `HELIOS_MODEL_REVISION` | latest resolved snapshot | Pins model and tokenizer files to a Hugging Face revision. |
 | `HF_TOKEN` / `HF_API_KEY` | unset | Hugging Face authentication. |
 | `HELIOS_TORCH_COMPILE` | `0` | Set to `1`, `true`, or `yes` to compile the model with dynamic shapes on first use. |
+| `HELIOS_MAX_GPU_UTILIZATION` | `0.90` | GPU-memory ceiling used to budget the warmed model, measured activation reserve, active request KV, and retained prefix KV. |
 | `HELIOS_WEIGHT_HEADROOM_RATIO` | `0.20` | Additional free-memory requirement before weight loading. |
-| `HELIOS_KV_CACHE_HEADROOM_RATIO` | `0.20` | Activation headroom retained when sizing the KV cache. |
+| `HELIOS_KV_CACHE_HEADROOM_RATIO` | `0.20` | Extra safety above the measured warmup peak; also used for provisional pre-warmup sizing. |
 | `HELIOS_PREFIX_CACHE_TTL_SECONDS` | `300` | Sliding lifetime of each cached prompt block; a cache hit refreshes it. |
 
 Both headroom ratios must be at least `0` and less than `1`.
+GPU utilization must be greater than `0` and at most `1`.
 The prefix-cache TTL must be finite and greater than `0`.
 
 ## Benchmarks
