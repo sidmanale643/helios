@@ -4,6 +4,7 @@ from dataclasses import replace
 from threading import Lock
 
 from helios.config import HeliosConfig
+from helios.runtime.check import MemoryChecker
 from helios.runtime.generate import GenerationResult, Generator
 from helios.runtime.load import Loader
 from helios.runtime.types import Sampling
@@ -17,6 +18,7 @@ class Engine:
         self.model_id = config.model_id
         self.model_revision = loaded.model_revision
         self.torch_compile = config.torch_compile
+        self._memory_checker = MemoryChecker(config)
         self.report = loaded.report
         self.generator = Generator(
             loaded.model,
@@ -25,6 +27,21 @@ class Engine:
             prefix_cache_ttl_seconds=config.prefix_cache_ttl_seconds,
         )
         self._generation_lock = Lock()
+
+    def update_cache_capacity(
+        self,
+        *,
+        warmup_peak_bytes: int,
+        warmup_kv_bytes: int,
+    ) -> None:
+        with self._generation_lock:
+            cache = self._memory_checker.cache(
+                self.generator.decoder.model.config,
+                warmup_peak_bytes=warmup_peak_bytes,
+                warmup_kv_bytes=warmup_kv_bytes,
+            )
+            self.generator.update_cache_capacity(cache)
+            self.report = replace(self.report, cache=cache)
 
     def prefix_cache_snapshot(self) -> dict[str, object]:
         with self._generation_lock:
@@ -36,7 +53,7 @@ class Engine:
                 "cached_tokens": cache.token_count,
                 "memory_bytes": cache.memory_bytes,
                 "max_blocks": None,
-                "max_memory_bytes": None,
+                "max_memory_bytes": cache.max_memory_bytes,
                 "blocks": [block.as_dict() for block in blocks],
             }
 

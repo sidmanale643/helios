@@ -2,6 +2,8 @@ import logging
 import time
 from dataclasses import dataclass
 
+import torch
+
 from helios.runtime.check import CacheCapacity
 from helios.runtime.prefix_cache import (
     PrefixCache,
@@ -59,8 +61,15 @@ class Generator:
         self.cache = cache
         self.prefix_cache = PrefixCache(
             block_size=PREFIX_CACHE_BLOCK_SIZE,
+            max_memory_bytes=cache.kv_budget_bytes,
             ttl_seconds=prefix_cache_ttl_seconds,
         )
+
+    def update_cache_capacity(self, cache: CacheCapacity) -> None:
+        self.cache = cache
+        self.prefix_cache.max_memory_bytes = cache.kv_budget_bytes
+        if self.prefix_cache.reserve(0):
+            torch.cuda.empty_cache()
 
     def run(
         self,
@@ -70,6 +79,17 @@ class Generator:
         *,
         request_id: str = "internal",
     ) -> GenerationResult:
+        request_cache_bytes = (
+            len(input_ids) + sampling.max_new_tokens
+        ) * self.cache.bytes_per_token
+        if request_cache_bytes > self.cache.kv_budget_bytes:
+            requested_tokens = len(input_ids) + sampling.max_new_tokens
+            raise ValueError(
+                f"Request needs {requested_tokens:,} KV-cache tokens, but the profiled "
+                f"limit is {self.cache.max_tokens:,}."
+            )
+        if self.prefix_cache.reserve(request_cache_bytes):
+            torch.cuda.empty_cache()
         lookup_started = time.perf_counter()
         prefix_hit = self.prefix_cache.longest_prefix(input_ids)
         prefix_lookup_seconds = time.perf_counter() - lookup_started
@@ -90,9 +110,15 @@ class Generator:
             prefix_hit=prefix_hit,
             request_id=request_id,
         )
+        prompt_blocks = describe_prompt_blocks(
+            input_ids, self.prefix_cache.block_size, prefix_hit
+        )
+        prefix_hit = None
         store_started = time.perf_counter()
         stored_blocks = self.prefix_cache.store_completed_blocks(
-            input_ids, decoded.cache
+            input_ids,
+            decoded.cache,
+            reserved_memory_bytes=request_cache_bytes,
         )
         store_seconds = time.perf_counter() - store_started
         logger.info(
@@ -113,9 +139,7 @@ class Generator:
             queue_seconds=0.0,
             prefix=PrefixTrace(
                 block_size=self.prefix_cache.block_size,
-                prompt_blocks=describe_prompt_blocks(
-                    input_ids, self.prefix_cache.block_size, prefix_hit
-                ),
+                prompt_blocks=prompt_blocks,
                 hit_tokens=hit_tokens,
                 restored_tokens=decoded.restored_tokens,
                 stored_blocks=stored_blocks,
