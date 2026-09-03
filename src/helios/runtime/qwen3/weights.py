@@ -29,7 +29,7 @@ class Qwen3Weights:
                         f"got {tuple(weights.shape)}."
                     )
                 with torch.no_grad():
-                    target.copy_(weights.to(device=target.device, dtype=target.dtype))
+                    target.copy_(weights)
                 loaded.add(name)
             del shard
             gc.collect()
