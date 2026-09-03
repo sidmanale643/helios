@@ -1,6 +1,8 @@
 import time
 from dataclasses import dataclass
 
+import torch
+
 from helios.runtime.engine import Engine
 from helios.runtime.generate import GenerationResult
 from helios.runtime.types import GenerateRequest, Sampling
@@ -32,7 +34,7 @@ class TextGenerator:
     def __init__(self, tokenizer: Tokenizer, engine: Engine) -> None:
         self.tokenizer = tokenizer
         self.engine = engine
-        self._compile_warmed = False
+        self._warmed = False
         if (
             tokenizer.model_id != engine.model_id
             or tokenizer.model_revision != engine.model_revision
@@ -73,22 +75,30 @@ class TextGenerator:
             store_seconds=result.store_seconds,
         )
 
-    def warm_up_compile(self) -> None:
-        if not self.engine.torch_compile or self._compile_warmed:
+    def warm_up(self) -> None:
+        if self._warmed:
             return
 
         input_ids = self.tokenizer.tokenize_chat(
             [("user", COMPILE_WARMUP_PROMPT)]
         )
-        try:
+        extended_ids = self.tokenizer.tokenize_chat(
+            [
+                ("user", COMPILE_WARMUP_PROMPT),
+                ("assistant", "Start with transaction integrity and cache invalidation."),
+                ("user", "Explain the rollout steps and how to measure their success."),
+            ]
+        )
+
+        def run(token_ids: list[int], request_id: str) -> GenerationResult:
             result = self._generate(
-                input_ids,
+                token_ids,
                 Sampling(
                     temperature=0,
                     top_p=1,
                     max_new_tokens=COMPILE_WARMUP_OUTPUT_TOKENS,
                 ),
-                request_id="startup-warmup",
+                request_id=request_id,
             )
             if not 2 <= len(result.output_ids) <= COMPILE_WARMUP_OUTPUT_TOKENS:
                 raise RuntimeError(
@@ -96,9 +106,39 @@ class TextGenerator:
                     f"{COMPILE_WARMUP_OUTPUT_TOKENS} tokens; generated "
                     f"{len(result.output_ids)}."
                 )
+            return result
+
+        cache = self.engine.generator.prefix_cache
+        device = self.engine.generator.decoder.device
+        cache.clear()
+        try:
+            run(input_ids, "startup-compile-cold")
+            result = run(extended_ids, "startup-compile-prefix")
+            if not 0 < result.prefix.restored_tokens < len(extended_ids) - 1:
+                raise RuntimeError(
+                    "Compile warmup must restore a prefix and prefill multiple new tokens."
+                )
+            del result
+            cache.clear()
+            torch.cuda.synchronize(device)
+            torch.cuda.empty_cache()
+            baseline = torch.cuda.memory_reserved(device)
+            torch.cuda.reset_peak_memory_stats(device)
+            run(input_ids, "startup-profile-cold")
+            torch.cuda.synchronize(device)
+            warmup_peak_bytes = torch.cuda.max_memory_reserved(device) - baseline
         finally:
-            self.engine.generator.prefix_cache.clear()
-        self._compile_warmed = True
+            cache.clear()
+        torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
+        warmup_kv_bytes = (
+            len(input_ids) + COMPILE_WARMUP_OUTPUT_TOKENS
+        ) * self.engine.generator.cache.bytes_per_token
+        self.engine.update_cache_capacity(
+            warmup_peak_bytes=warmup_peak_bytes,
+            warmup_kv_bytes=warmup_kv_bytes,
+        )
+        self._warmed = True
 
     @property
     def model_id(self) -> str:
@@ -125,7 +165,7 @@ class TextGenerator:
             "model_revision": self.engine.model_revision,
             "torch_compile": {
                 "enabled": self.engine.torch_compile,
-                "warmed": self._compile_warmed,
+                "warmed": self._warmed and self.engine.torch_compile,
             },
             "memory": self.engine.report.as_dict(),
         }

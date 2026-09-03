@@ -33,11 +33,19 @@ async def lifespan(app: FastAPI):
         engine.model_revision,
     )
     generator = TextGenerator(tokenizer, engine)
-    if config.torch_compile:
-        logger.info("startup_compile_warmup_started")
-    generator.warm_up_compile()
-    if config.torch_compile:
-        logger.info("startup_compile_warmup_completed")
+    logger.info("startup_warmup_started")
+    generator.warm_up()
+    logger.info("startup_warmup_completed")
+    cache = engine.report.cache
+    logger.info(
+        "startup_memory_profiled model_occupied_bytes=%d warmup_peak_bytes=%d "
+        "headroom_bytes=%d kv_budget_bytes=%d max_tokens=%d",
+        cache.model_occupied_bytes,
+        cache.warmup_peak_bytes,
+        cache.activation_headroom_bytes,
+        cache.kv_budget_bytes,
+        cache.max_tokens,
+    )
     app.state.generator = generator
     logger.info(
         "startup_ready model=%s revision=%s",
