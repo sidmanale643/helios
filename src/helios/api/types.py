@@ -6,7 +6,7 @@ from helios.runtime.types import Sampling
 
 
 class ChatMessage(BaseModel):
-    role: Literal["developer", "system", "user", "assistant"]
+    role: Literal["developer", "system", "user", "assistant", "tool"]
     content: str = Field(min_length=1, max_length=20_000)
 
 
@@ -53,6 +53,16 @@ class ChatCompletionUsage(BaseModel):
     prompt_tokens_details: ChatCompletionPromptTokensDetails
 
 
+class ChatCompletionTimings(BaseModel):
+    tokenize_seconds: float
+    queue_seconds: float
+    prefix_lookup_seconds: float
+    restore_seconds: float
+    prefill_seconds: float
+    decode_seconds: float
+    store_seconds: float
+
+
 class ChatCompletionResponse(BaseModel):
     id: str
     object: Literal["chat.completion"] = "chat.completion"
@@ -60,3 +70,4 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[ChatCompletionChoice]
     usage: ChatCompletionUsage
+    timings: ChatCompletionTimings

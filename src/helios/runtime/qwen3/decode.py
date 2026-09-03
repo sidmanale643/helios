@@ -1,3 +1,4 @@
+import logging
 import time
 from dataclasses import dataclass
 
@@ -7,6 +8,9 @@ from helios.runtime.prefix_cache import PrefixCacheHit
 from helios.runtime.qwen3.cache import KVCache
 from helios.runtime.qwen3.model import Qwen3Model
 from helios.runtime.types import Sampling
+
+logger = logging.getLogger("uvicorn.error")
+PROGRESS_INTERVAL_TOKENS = 32
 
 
 @dataclass
@@ -24,7 +28,14 @@ class Decoder:
     def __init__(self, model: Qwen3Model, *, torch_compile: bool = False) -> None:
         self.model = model
         self._forward = (
-            torch.compile(model, dynamic=True, fullgraph=True) if torch_compile else model
+            torch.compile(
+                model,
+                dynamic=True,
+                fullgraph=True,
+                mode="default",
+            )
+            if torch_compile
+            else model
         )
 
     def generate(
@@ -35,6 +46,7 @@ class Decoder:
         *,
         max_total_tokens: int,
         prefix_hit: PrefixCacheHit | None = None,
+        request_id: str = "internal",
     ) -> DecodeResult:
         capacity = len(input_ids) + sampling.max_new_tokens
         if capacity > max_total_tokens:
@@ -76,7 +88,9 @@ class Decoder:
         with torch.inference_mode():
             self._synchronize()
             started = time.perf_counter()
-            logits = self._forward(token_tensor, cache=cache)[:, -1, :]
+            forward_logits = self._forward(token_tensor, cache=cache)
+            self._validate_forward_shapes(token_tensor, forward_logits)
+            logits = forward_logits[:, -1, :]
             for index in range(sampling.max_new_tokens):
                 next_token = self._sample(logits, sampling)
                 self._synchronize()
@@ -90,10 +104,25 @@ class Decoder:
                 if index > 0:
                     inter_token_seconds.append(elapsed)
                 generated.append(token_id)
+                generated_tokens = len(generated)
+                if (
+                    generated_tokens == 1
+                    or generated_tokens % PROGRESS_INTERVAL_TOKENS == 0
+                ):
+                    logger.info(
+                        "generation_progress request_id=%s output_tokens=%d "
+                        "max_new_tokens=%d last_token_ms=%.1f",
+                        request_id,
+                        generated_tokens,
+                        sampling.max_new_tokens,
+                        elapsed * 1_000,
+                    )
                 if index + 1 < sampling.max_new_tokens:
                     self._synchronize()
                     started = time.perf_counter()
-                    logits = self._forward(next_token, cache=cache)[:, -1, :]
+                    forward_logits = self._forward(next_token, cache=cache)
+                    self._validate_forward_shapes(next_token, forward_logits)
+                    logits = forward_logits[:, -1, :]
         return DecodeResult(
             output_ids=generated,
             finish_reason=finish_reason,
@@ -113,6 +142,22 @@ class Decoder:
             torch.cuda.synchronize(self.device)
         elif self.device.type == "mps":
             torch.mps.synchronize()
+
+    def _validate_forward_shapes(
+        self, input_ids: torch.Tensor, logits: torch.Tensor
+    ) -> None:
+        if input_ids.ndim != 2 or input_ids.shape[0] != 1 or input_ids.shape[1] < 1:
+            raise RuntimeError(
+                "Decoder input must have shape [1, tokens] with at least one token."
+            )
+        if input_ids.dtype != torch.long:
+            raise RuntimeError("Decoder input token IDs must use torch.long.")
+        expected_logits = (1, input_ids.shape[1], self.model.config.vocab_size)
+        if logits.shape != expected_logits:
+            raise RuntimeError(
+                "Decoder logits must have shape "
+                f"{expected_logits}; received {tuple(logits.shape)}."
+            )
 
     @staticmethod
     def _sample(logits: torch.Tensor, sampling: Sampling) -> torch.Tensor:

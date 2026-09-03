@@ -1,3 +1,4 @@
+import logging
 import time
 from dataclasses import dataclass
 
@@ -12,6 +13,7 @@ from helios.runtime.qwen3.model import Qwen3Model
 from helios.runtime.types import Sampling
 
 PREFIX_CACHE_BLOCK_SIZE = 16
+logger = logging.getLogger("uvicorn.error")
 
 
 @dataclass(frozen=True)
@@ -65,22 +67,41 @@ class Generator:
         input_ids: list[int],
         eos_token_id: int,
         sampling: Sampling,
+        *,
+        request_id: str = "internal",
     ) -> GenerationResult:
         lookup_started = time.perf_counter()
         prefix_hit = self.prefix_cache.longest_prefix(input_ids)
         prefix_lookup_seconds = time.perf_counter() - lookup_started
+        hit_tokens = 0 if prefix_hit is None else prefix_hit.length
+        logger.info(
+            "prefix_cache request_id=%s status=%s cached_tokens=%d prompt_tokens=%d lookup_ms=%.1f",
+            request_id,
+            "hit" if hit_tokens else "miss",
+            hit_tokens,
+            len(input_ids),
+            prefix_lookup_seconds * 1_000,
+        )
         decoded = self.decoder.generate(
             input_ids,
             eos_token_id,
             sampling,
             max_total_tokens=self.cache.max_tokens,
             prefix_hit=prefix_hit,
+            request_id=request_id,
         )
         store_started = time.perf_counter()
         stored_blocks = self.prefix_cache.store_completed_blocks(
             input_ids, decoded.cache
         )
         store_seconds = time.perf_counter() - store_started
+        logger.info(
+            "prefix_cache_store request_id=%s stored_blocks=%d occupied_blocks=%d store_ms=%.1f",
+            request_id,
+            stored_blocks,
+            len(self.prefix_cache.blocks()),
+            store_seconds * 1_000,
+        )
         return GenerationResult(
             output_ids=decoded.output_ids,
             finish_reason=decoded.finish_reason,
@@ -95,7 +116,7 @@ class Generator:
                 prompt_blocks=describe_prompt_blocks(
                     input_ids, self.prefix_cache.block_size, prefix_hit
                 ),
-                hit_tokens=0 if prefix_hit is None else prefix_hit.length,
+                hit_tokens=hit_tokens,
                 restored_tokens=decoded.restored_tokens,
                 stored_blocks=stored_blocks,
             ),

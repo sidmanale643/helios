@@ -1,3 +1,4 @@
+import logging
 import time
 import uuid
 from typing import Annotated
@@ -12,11 +13,13 @@ from helios.api.types import (
     ChatCompletionPromptTokensDetails,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionTimings,
     ChatCompletionUsage,
 )
 from helios.runtime.frontend import TextGenerator
 
 router = APIRouter()
+logger = logging.getLogger("uvicorn.error")
 GeneratorDependency = Annotated[TextGenerator, Depends(get_generator)]
 
 
@@ -37,7 +40,20 @@ async def chat_completions(
     payload: ChatCompletionRequest,
     generator: GeneratorDependency,
 ) -> ChatCompletionResponse:
+    request_id = f"chatcmpl-{uuid.uuid4().hex}"
+    logger.info(
+        "request_received request_id=%s model=%s messages=%d max_new_tokens=%d",
+        request_id,
+        payload.model,
+        len(payload.messages),
+        payload.max_tokens,
+    )
     if payload.model != generator.model_id:
+        logger.warning(
+            "request_rejected request_id=%s reason=model_not_loaded requested_model=%s",
+            request_id,
+            payload.model,
+        )
         raise HTTPException(
             status_code=404,
             detail=f"Model '{payload.model}' is not loaded. Use '{generator.model_id}'.",
@@ -53,11 +69,20 @@ async def chat_completions(
                 for message in payload.messages
             ],
             payload.sampling(),
+            request_id,
         )
     except ValueError as error:
+        logger.warning(
+            "request_rejected request_id=%s reason=invalid_request detail=%s",
+            request_id,
+            error,
+        )
         raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception:
+        logger.exception("request_failed request_id=%s", request_id)
+        raise
     return ChatCompletionResponse(
-        id=f"chatcmpl-{uuid.uuid4().hex}",
+        id=request_id,
         created=int(time.time()),
         model=generator.model_id,
         choices=[
@@ -73,5 +98,14 @@ async def chat_completions(
             prompt_tokens_details=ChatCompletionPromptTokensDetails(
                 cached_tokens=result.cached_tokens,
             ),
+        ),
+        timings=ChatCompletionTimings(
+            tokenize_seconds=result.tokenize_seconds,
+            queue_seconds=result.queue_seconds,
+            prefix_lookup_seconds=result.prefix_lookup_seconds,
+            restore_seconds=result.restore_seconds,
+            prefill_seconds=result.prefill_seconds,
+            decode_seconds=result.decode_seconds,
+            store_seconds=result.store_seconds,
         ),
     )
