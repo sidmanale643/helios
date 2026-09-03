@@ -152,7 +152,7 @@ class Decoder:
             )
         if input_ids.dtype != torch.long:
             raise RuntimeError("Decoder input token IDs must use torch.long.")
-        expected_logits = (1, input_ids.shape[1], self.model.config.vocab_size)
+        expected_logits = (1, 1, self.model.config.vocab_size)
         if logits.shape != expected_logits:
             raise RuntimeError(
                 "Decoder logits must have shape "

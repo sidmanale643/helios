@@ -39,4 +39,5 @@ class Qwen3Model(nn.Module):
             )
         if cache is not None:
             cache.advance(tokens)
+        x = x[:, -1:, :]
         return self.output(self.final_norm(x).to(self.config.dtype))
