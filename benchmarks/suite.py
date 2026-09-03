@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 
-SUITE_VERSION = 3
+from helios.runtime.warmup import COMPILE_WARMUP_PROMPT
+
+SUITE_VERSION = 4
 
 PREFILL_CONTEXT = """
 Northwind Health operates twelve neighborhood clinics. Each clinic publishes appointment
@@ -26,15 +28,7 @@ PREFILL_INPUT = "\n\n".join(PREFILL_CONTEXT for _ in range(5)) + (
     "\n\nName the first action only."
 )
 
-BALANCED_INPUT = """
-A regional library system has eight branches, a shared catalog, self-checkout kiosks, and a
-mobile app. Patrons report that newly returned books sometimes remain unavailable for several
-minutes, while staff occasionally see the same hold assigned twice during busy evenings. The
-system uses one API, PostgreSQL, Redis, and a background worker. The team can make focused
-changes but cannot replace these components. Recommend a staged reliability improvement that
-includes data integrity, cache invalidation, observability, rollout safety, and user-facing error
-handling. State the tradeoffs and define concrete metrics.
-""".strip()
+BALANCED_INPUT = COMPILE_WARMUP_PROMPT
 
 AGENT_SYSTEM = """
 You are an operations assistant for a multi-tenant commerce platform. Decide which tools to use,

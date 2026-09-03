@@ -1,6 +1,13 @@
 # Fixed benchmark suite
 
-Run the suite to load the model once and execute every workload in order:
+Start Helios in one terminal. Model loading and the one-time compile warmup belong
+to the server process:
+
+```bash
+HELIOS_TORCH_COMPILE=1 uv run helios
+```
+
+Then run the HTTP-only benchmark client in another terminal:
 
 ```bash
 uv run python benchmarks/run.py --label baseline
@@ -9,10 +16,13 @@ uv run python benchmarks/run.py --label prefix-cache
 uv run python benchmarks/run.py --label torch-compile
 ```
 
-The label only names the saved result. It does not change the workload.
+The benchmark never loads, starts, stops, or owns the model. It only calls the
+running server's `/health` and `/v1/chat/completions` endpoints. Use `--base-url`
+or `HELIOS_BASE_URL` when Helios is not listening on `http://127.0.0.1:8000`.
+The label only names the saved result; it does not change the workload.
 
-The suite loads the model once, sends every workload input to the model in order,
-and saves each generated output with its metrics. All four workloads run together:
+The client sends every workload input to the server in order and saves each
+generated output with its metrics. All four workloads run together:
 
 | Workload | Shape | What it isolates |
 | --- | --- | --- |

@@ -1,20 +1,16 @@
 import argparse
 import json
+import os
 import platform
 import socket
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
-import torch
 from suite import SUITE_VERSION, WORKLOADS, RequestSpec, requests_for
-
-from helios.config import get_config
-from helios.runtime.engine import Engine
-from helios.runtime.frontend import TextGenerator
-from helios.runtime.types import Sampling
-from helios.runtime.worker import Tokenizer
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "benchmarks" / "results"
@@ -22,54 +18,107 @@ RESULTS = ROOT / "benchmarks" / "results"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Load Helios once and run every benchmark workload in order."
+        description="Run every benchmark workload against an existing Helios server."
     )
     parser.add_argument("--label", default="run", help="Name for the saved result.")
+    parser.add_argument(
+        "--base-url",
+        default=os.getenv("HELIOS_BASE_URL", "http://127.0.0.1:8000"),
+        help="URL of an already-running Helios server.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=1_800,
+        help="Per-request timeout in seconds.",
+    )
     return parser.parse_args()
 
 
-def accelerator() -> dict[str, str]:
-    if torch.cuda.is_available():
-        return {"kind": "cuda", "name": torch.cuda.get_device_name(0)}
-    if torch.backends.mps.is_available():
-        return {"kind": "mps", "name": "Apple Metal"}
-    return {"kind": "cpu", "name": platform.processor() or "unknown"}
+def request_json(
+    base_url: str,
+    path: str,
+    *,
+    timeout: float,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    data = None if payload is None else json.dumps(payload).encode()
+    request = Request(
+        f"{base_url.rstrip('/')}{path}",
+        data=data,
+        headers={"Content-Type": "application/json"} if data is not None else {},
+        method="POST" if data is not None else "GET",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read())
+    except HTTPError as error:
+        detail = error.read().decode(errors="replace")
+        raise RuntimeError(
+            f"Helios returned HTTP {error.code} for {path}: {detail}"
+        ) from error
+    except URLError as error:
+        raise RuntimeError(
+            f"Cannot reach Helios at {base_url}. Start it first with `uv run helios`."
+        ) from error
 
 
-def run_request(generator: TextGenerator, spec: RequestSpec) -> dict[str, Any]:
-    sampling = Sampling(temperature=0, top_p=1, max_new_tokens=spec.workload.max_new_tokens)
+def run_request(
+    base_url: str,
+    model: str,
+    spec: RequestSpec,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
     started = time.perf_counter()
-    tokenize_started = time.perf_counter()
-    input_ids = generator.tokenizer.tokenize_chat(list(spec.messages))
-    tokenize_seconds = time.perf_counter() - tokenize_started
-    result = generator.engine.run(input_ids, generator.tokenizer.eos_token_id, sampling)
-    output = generator.tokenizer.detokenize(result.output_ids)
+    response = request_json(
+        base_url,
+        "/v1/chat/completions",
+        timeout=timeout,
+        payload={
+            "model": model,
+            "messages": [
+                {"role": role, "content": content}
+                for role, content in spec.messages
+            ],
+            "temperature": 0,
+            "top_p": 1,
+            "max_tokens": spec.workload.max_new_tokens,
+            "stream": False,
+        },
+    )
     end_to_end_seconds = time.perf_counter() - started
-    generation_seconds = result.prefill_seconds + sum(result.inter_token_seconds)
+    usage = response["usage"]
+    timings = response["timings"]
+    generation_seconds = timings["prefill_seconds"] + timings["decode_seconds"]
+    prompt_tokens = usage["prompt_tokens"]
+    output_tokens = usage["completion_tokens"]
 
     return {
         "workload": spec.workload.name,
         "phase": spec.phase,
         "input": spec.messages,
-        "output": output,
+        "output": response["choices"][0]["message"]["content"],
         "metrics": {
-            "prompt_tokens": len(input_ids),
-            "output_tokens": len(result.output_ids),
+            "prompt_tokens": prompt_tokens,
+            "output_tokens": output_tokens,
             "end_to_end_seconds": end_to_end_seconds,
             "time_to_first_token_seconds": (
-                tokenize_seconds
-                + result.queue_seconds
-                + result.prefix_lookup_seconds
-                + result.restore_seconds
-                + result.prefill_seconds
+                timings["tokenize_seconds"]
+                + timings["queue_seconds"]
+                + timings["prefix_lookup_seconds"]
+                + timings["restore_seconds"]
+                + timings["prefill_seconds"]
             ),
             "generation_tokens_per_second": (
-                len(result.output_ids) / generation_seconds
+                output_tokens / generation_seconds
                 if generation_seconds > 0
                 else None
             ),
-            "restored_tokens": result.prefix.restored_tokens,
-            "cache_hit_rate": result.prefix.restored_tokens / len(input_ids),
+            "restored_tokens": usage["prompt_tokens_details"]["cached_tokens"],
+            "cache_hit_rate": (
+                usage["prompt_tokens_details"]["cached_tokens"] / prompt_tokens
+            ),
         },
     }
 
@@ -105,25 +154,32 @@ def report(samples: list[dict[str, Any]], path: Path) -> str:
 
 def main() -> None:
     args = parse_args()
-    config = get_config()
-    tokenizer = Tokenizer.load(config)
-    generator = TextGenerator(tokenizer, Engine(config))
-    health = generator.health()
+    health = request_json(args.base_url, "/health", timeout=args.timeout)
+    model = health["model"]
 
     samples = []
     for workload in WORKLOADS:
         for request in requests_for(workload):
-            samples.append(run_request(generator, request))
+            samples.append(
+                run_request(
+                    args.base_url,
+                    model,
+                    request,
+                    timeout=args.timeout,
+                )
+            )
 
     now = datetime.now(UTC)
     record = {
-        "schema_version": 3,
+        "schema_version": 4,
         "timestamp": now.isoformat(),
         "label": args.label,
         "machine": {"hostname": socket.gethostname(), "platform": platform.platform()},
-        "accelerator": accelerator(),
+        "server": args.base_url,
+        "accelerator": {"kind": "cuda", "name": health["memory"]["gpu"]},
         "model": {"id": health["model"], "revision": health["model_revision"]},
         "suite_version": SUITE_VERSION,
+        "torch_compile": health["torch_compile"],
         "samples": samples,
     }
     RESULTS.mkdir(parents=True, exist_ok=True)

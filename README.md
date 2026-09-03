@@ -76,14 +76,16 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 The response uses the OpenAI chat-completion shape and includes one assistant
 choice plus prompt, completion, and total token counts. Reused prefix-cache
-tokens are reported in `usage.prompt_tokens_details.cached_tokens`.
+tokens are reported in `usage.prompt_tokens_details.cached_tokens`. The
+Helios-specific `timings` object reports tokenization, queue, cache lookup,
+restore, prefill, decode, and cache-store durations.
 
 Supported request fields:
 
 | Field | Notes |
 | --- | --- |
 | `model` | Must be `Qwen/Qwen3-4B`. |
-| `messages` | 1–128 `developer`, `system`, `user`, or `assistant` messages. |
+| `messages` | 1–128 `developer`, `system`, `user`, `assistant`, or plain `tool` transcript messages. |
 | `max_tokens` | 1–2,048; defaults to 256. `max_completion_tokens` is accepted as an alias. |
 | `temperature` | 0–2; defaults to 0.2. |
 | `top_p` | Greater than 0 and at most 1; defaults to 0.95. |
@@ -91,6 +93,20 @@ Supported request fields:
 
 Streaming, tool calls, structured outputs, authentication, and the rest of the
 OpenAI API are not implemented.
+
+## Request logs
+
+The server terminal reports each request without logging prompt or generated
+text. Every line carries the same `request_id` across these events:
+
+- `request_received` when the API accepts the request.
+- `request_queued` when another generation owns the model lock.
+- `request_running` with prompt size, output limit, and queue time.
+- `prefix_cache` with `status=hit|miss` and the cached-token count.
+- `generation_progress` after the first token and every 32 tokens thereafter.
+- `prefix_cache_store` after completed prompt blocks are stored.
+- `request_completed` with finish reason, token counts, model TTFT, throughput, and total time.
+- `request_failed` or `request_rejected` when processing does not complete.
 
 ## Python usage
 
@@ -139,6 +155,9 @@ flowchart LR
 At startup, Helios resolves one Hugging Face snapshot for both the tokenizer
 and model, checks GPU memory, loads the safetensors into the native Qwen3
 implementation, and reserves the remaining capacity for KV-cache tokens.
+When Torch compilation is enabled, startup performs one fixed balanced-prompt
+generation of four greedy tokens to compile the prefill and decode shapes, then
+clears that prompt from the prefix cache before serving requests.
 
 For each request, the tokenizer applies the Qwen3 chat template. The engine
 looks up the longest complete cached prompt prefix, restores its per-layer K/V
@@ -165,16 +184,21 @@ The prefix-cache TTL must be finite and greater than `0`.
 
 ## Benchmarks
 
-Run the fixed prompt suite and save a comparable result:
+Run the fixed multi-workload suite and save a comparable baseline:
 
 ```bash
-uv run python benchmarks/run.py --name decode-128
+# Terminal 1: load the model and keep Helios running.
+uv run helios
+
+# Terminal 2: call the running server.
+uv run python benchmarks/run.py --label baseline
 ```
 
-The benchmark warms every prompt before measuring it, so the current protocol
-measures warm-prefix behavior. Results are written to `benchmarks/results/`
-with the model revision, Git state, host, accelerator, workload, raw samples,
-and aggregate metrics. Equivalent runs are compared automatically.
+The suite covers long-prefill, long-decode, balanced, and a growing simulated
+tool-agent transcript with prefix reuse. The benchmark client never loads or
+stops the model. Results are written to
+`benchmarks/results/` with the model revision, Git state, host, accelerator, raw
+samples, and aggregate metrics. Equivalent runs are compared automatically.
 
 See [benchmarks/README.md](benchmarks/README.md) for the protocol and options.
 
