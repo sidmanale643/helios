@@ -91,6 +91,11 @@ Supported request fields:
 | `top_p` | Greater than 0 and at most 1; defaults to 0.95. |
 | `stream` | Must be `false`. |
 
+Send one request object for single generation. For static batching, send
+`{"requests": [request, ...]}` to the same `/v1/chat/completions` endpoint;
+the body shape selects the generation mode automatically, with 1–32 requests
+per batch.
+
 Streaming, tool calls, structured outputs, authentication, and the rest of the
 OpenAI API are not implemented.
 
@@ -107,29 +112,6 @@ text. Every line carries the same `request_id` across these events:
 - `prefix_cache_store` after completed prompt blocks are stored.
 - `request_completed` with finish reason, token counts, model TTFT, throughput, and total time.
 - `request_failed` or `request_rejected` when processing does not complete.
-
-## Python usage
-
-The same runtime can be called without HTTP:
-
-```python
-from helios.config import get_config
-from helios.runtime.engine import Engine
-from helios.runtime.frontend import TextGenerator
-from helios.runtime.types import GenerateRequest
-from helios.runtime.worker import Tokenizer
-
-config = get_config()
-generator = TextGenerator(Tokenizer.load(config), Engine(config))
-
-text = generator.run(
-    GenerateRequest(
-        text="Explain speculative decoding in simple terms.",
-        sampling={"temperature": 0.2, "max_new_tokens": 128},
-    )
-)
-print(text)
-```
 
 ## How it works
 

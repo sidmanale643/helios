@@ -48,11 +48,17 @@ async def prefix_cache_state(generator: GeneratorDependency) -> dict[str, object
     return await run_in_threadpool(generator.engine.prefix_cache_snapshot)
 
 
-@router.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+@router.post(
+    "/v1/chat/completions",
+    response_model=ChatCompletionResponse | ChatCompletionBatchResponse,
+)
 async def chat_completions(
-    payload: ChatCompletionRequest,
+    payload: ChatCompletionRequest | ChatCompletionBatchRequest,
     generator: GeneratorDependency,
-) -> ChatCompletionResponse:
+) -> ChatCompletionResponse | ChatCompletionBatchResponse:
+    if isinstance(payload, ChatCompletionBatchRequest):
+        return await _chat_completions_batch(payload, generator)
+
     request_id = f"chatcmpl-{uuid.uuid4().hex}"
     logger.info(
         "request_received request_id=%s model=%s messages=%d max_new_tokens=%d",
@@ -118,8 +124,7 @@ async def chat_completions(
     )
 
 
-@router.post("/v1/chat/completions/batch", response_model=ChatCompletionBatchResponse)
-async def chat_completions_batch(
+async def _chat_completions_batch(
     payload: ChatCompletionBatchRequest,
     generator: GeneratorDependency,
 ) -> ChatCompletionBatchResponse:

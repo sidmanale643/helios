@@ -18,10 +18,11 @@ uv run python benchmarks/run.py --label static-batch --batch
 ```
 
 The benchmark never loads, starts, stops, or owns the model. It only calls the
-running server's `/health`, `/v1/chat/completions`, and
-`/v1/chat/completions/batch` endpoints. Use `--base-url` or `HELIOS_BASE_URL`
-when Helios is not listening on `http://127.0.0.1:8000`. The label only names
-the saved result; it does not change the workload.
+running server's `/health` and `/v1/chat/completions` endpoints. The chat
+endpoint infers single or static-batch generation from the request body. Use
+`--base-url` or `HELIOS_BASE_URL` when Helios is not listening on
+`http://127.0.0.1:8000`. The label only names the saved result; it does not
+change the workload.
 
 By default, the client sends every workload input to the server in order. Pass
 `--batch` to send the entire suite through one model-side static batch. Static

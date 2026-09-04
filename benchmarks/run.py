@@ -138,7 +138,7 @@ def run_batch(
     started = time.perf_counter()
     response = request_json(
         base_url,
-        "/v1/chat/completions/batch",
+        "/v1/chat/completions",
         timeout=timeout,
         payload={
             "requests": [

@@ -5,7 +5,7 @@ import torch
 
 from helios.runtime.engine import Engine
 from helios.runtime.generate import GenerationResult
-from helios.runtime.types import GenerateBatch, GenerateRequest, Sampling
+from helios.runtime.types import Sampling
 from helios.runtime.warmup import (
     COMPILE_WARMUP_OUTPUT_TOKENS,
     COMPILE_WARMUP_PROMPT,
@@ -52,22 +52,6 @@ class TextGenerator:
                 f"tokenizer={tokenizer.model_id}@{tokenizer.model_revision}, "
                 f"model={engine.model_id}@{engine.model_revision}."
             )
-
-    def run(self, request: GenerateRequest) -> str:
-        input_ids = self.tokenizer.tokenize(request.text)
-        result = self._generate(input_ids, request.sampling)
-        return self.tokenizer.detokenize(result.output_ids)
-
-    def run_batch(self, batch: GenerateBatch) -> list[str]:
-        input_ids = [
-            self.tokenizer.tokenize(request.text) for request in batch.requests
-        ]
-        result = self.engine.run_batch(
-            input_ids,
-            self.tokenizer.eos_token_id,
-            [request.sampling for request in batch.requests],
-        )
-        return [self.tokenizer.detokenize(tokens) for tokens in result.output_ids]
 
     def run_chat_batch(
         self,
