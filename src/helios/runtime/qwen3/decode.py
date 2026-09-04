@@ -176,6 +176,12 @@ class Decoder:
                 f"profiled limit is {max_total_tokens:,}."
             )
 
+        started = time.perf_counter()
+        logger.info(
+            "batch_prefill_started batch_size=%d padded_prompt_tokens=%d "
+            "max_new_tokens=%d kv_cache_tokens=%d",
+            batch_size, longest_prompt, max_new_tokens, batch_size * capacity,
+        )
         token_tensor = torch.full(
             (batch_size, longest_prompt),
             eos_token_id,
@@ -210,9 +216,14 @@ class Decoder:
                 attention_mask=key_mask,
                 position_ids=position_ids,
             )[:, -1, :]
-            for _ in range(max_new_tokens):
+            for index in range(max_new_tokens):
                 next_token = self._sample(logits, sampling)
                 token_ids = next_token.squeeze(1).tolist()
+                if index == 0:
+                    logger.info(
+                        "batch_prefill_completed elapsed_ms=%.1f",
+                        (time.perf_counter() - started) * 1_000,
+                    )
                 active = ~finished
                 active_rows = active.tolist()
                 for row, token_id in enumerate(token_ids):
@@ -223,6 +234,15 @@ class Decoder:
                     [len(tokens) for tokens in generated], device=self.device
                 )
                 finished = eos_finished | generated_counts.ge(token_limits)
+                if index == 0 or (index + 1) % PROGRESS_INTERVAL_TOKENS == 0:
+                    logger.info(
+                        "batch_generation_progress step=%d max_new_tokens=%d "
+                        "output_tokens=%d elapsed_seconds=%.1f",
+                        index + 1,
+                        max_new_tokens,
+                        sum(len(tokens) for tokens in generated),
+                        time.perf_counter() - started,
+                    )
                 if finished.all():
                     break
 

@@ -123,7 +123,11 @@ async def chat_completions_batch(
     payload: ChatCompletionBatchRequest,
     generator: GeneratorDependency,
 ) -> ChatCompletionBatchResponse:
+    batch_id = f"batch-{uuid.uuid4().hex}"
+    started = time.perf_counter()
+    logger.info("batch_received batch_id=%s batch_size=%d", batch_id, len(payload.requests))
     if any(request.model != generator.model_id for request in payload.requests):
+        logger.warning("batch_rejected batch_id=%s reason=model_not_loaded", batch_id)
         raise HTTPException(
             status_code=404,
             detail=f"Every request must use the loaded model '{generator.model_id}'.",
@@ -135,7 +139,17 @@ async def chat_completions_batch(
             [request.sampling() for request in payload.requests],
         )
     except ValueError as error:
+        logger.warning("batch_rejected batch_id=%s detail=%s", batch_id, error)
         raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception:
+        logger.exception("batch_failed batch_id=%s", batch_id)
+        raise
+    logger.info(
+        "batch_completed batch_id=%s output_tokens=%d total_ms=%.1f",
+        batch_id,
+        sum(result.completion_tokens),
+        (time.perf_counter() - started) * 1_000,
+    )
     return ChatCompletionBatchResponse(
         model=generator.model_id,
         items=[

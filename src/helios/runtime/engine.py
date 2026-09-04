@@ -134,5 +134,14 @@ class Engine:
             raise ValueError(
                 f"Token IDs must be smaller than the model vocabulary size ({vocabulary_size:,})."
             )
+        if self._generation_lock.locked():
+            logger.info("batch_queued batch_size=%d", len(input_ids))
+        wait_started = time.perf_counter()
         with self._generation_lock:
+            logger.info(
+                "batch_running batch_size=%d prompt_tokens=%d queue_ms=%.1f",
+                len(input_ids),
+                sum(len(prompt) for prompt in input_ids),
+                (time.perf_counter() - wait_started) * 1_000,
+            )
             return self.generator.run_batch(input_ids, eos_token_id, samplings)
