@@ -71,3 +71,21 @@ class ChatCompletionResponse(BaseModel):
     choices: list[ChatCompletionChoice]
     usage: ChatCompletionUsage
     timings: ChatCompletionTimings
+
+
+class ChatCompletionBatchRequest(BaseModel):
+    requests: list[ChatCompletionRequest] = Field(min_length=1, max_length=32)
+
+
+class ChatCompletionBatchItem(BaseModel):
+    index: int
+    content: str
+    finish_reason: Literal["stop", "length"]
+    prompt_tokens: int
+    completion_tokens: int
+
+
+class ChatCompletionBatchResponse(BaseModel):
+    object: Literal["chat.completion.batch"] = "chat.completion.batch"
+    model: str
+    items: list[ChatCompletionBatchItem]

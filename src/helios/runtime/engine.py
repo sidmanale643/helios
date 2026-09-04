@@ -125,7 +125,7 @@ class Engine:
         self,
         input_ids: list[list[int]],
         eos_token_id: int,
-        sampling: Sampling,
+        samplings: list[Sampling],
     ) -> BatchDecodeResult:
         vocabulary_size = self.generator.decoder.model.config.vocab_size
         if eos_token_id >= vocabulary_size or any(
@@ -135,4 +135,4 @@ class Engine:
                 f"Token IDs must be smaller than the model vocabulary size ({vocabulary_size:,})."
             )
         with self._generation_lock:
-            return self.generator.run_batch(input_ids, eos_token_id, sampling)
+            return self.generator.run_batch(input_ids, eos_token_id, samplings)

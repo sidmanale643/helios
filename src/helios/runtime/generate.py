@@ -150,10 +150,13 @@ class Generator:
         self,
         input_ids: list[list[int]],
         eos_token_id: int,
-        sampling: Sampling,
+        samplings: list[Sampling],
     ) -> BatchDecodeResult:
         longest_prompt = max((len(tokens) for tokens in input_ids), default=0)
-        cache_tokens = len(input_ids) * (longest_prompt + sampling.max_new_tokens)
+        max_new_tokens = max(
+            (sampling.max_new_tokens for sampling in samplings), default=0
+        )
+        cache_tokens = len(input_ids) * (longest_prompt + max_new_tokens)
         request_cache_bytes = cache_tokens * self.cache.bytes_per_token
         if request_cache_bytes > self.cache.kv_budget_bytes:
             raise ValueError(
@@ -165,6 +168,6 @@ class Generator:
         return self.decoder.generate_batch(
             input_ids,
             eos_token_id,
-            sampling,
+            samplings,
             max_total_tokens=self.cache.kv_budget_bytes // self.cache.bytes_per_token,
         )

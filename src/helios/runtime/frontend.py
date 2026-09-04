@@ -29,6 +29,14 @@ class ChatGeneration:
     store_seconds: float = 0.0
 
 
+@dataclass(frozen=True)
+class ChatBatchGeneration:
+    texts: list[str]
+    finish_reasons: list[str]
+    prompt_tokens: list[int]
+    completion_tokens: list[int]
+
+
 class TextGenerator:
 
     def __init__(self, tokenizer: Tokenizer, engine: Engine) -> None:
@@ -51,18 +59,31 @@ class TextGenerator:
         return self.tokenizer.detokenize(result.output_ids)
 
     def run_batch(self, batch: GenerateBatch) -> list[str]:
-        sampling = batch.requests[0].sampling
-        if any(request.sampling != sampling for request in batch.requests[1:]):
-            raise ValueError(
-                "Every request in a batch must use the same sampling settings."
-            )
         input_ids = [
             self.tokenizer.tokenize(request.text) for request in batch.requests
         ]
         result = self.engine.run_batch(
-            input_ids, self.tokenizer.eos_token_id, sampling
+            input_ids,
+            self.tokenizer.eos_token_id,
+            [request.sampling for request in batch.requests],
         )
         return [self.tokenizer.detokenize(tokens) for tokens in result.output_ids]
+
+    def run_chat_batch(
+        self,
+        messages: list[list[tuple[str, str]]],
+        samplings: list[Sampling],
+    ) -> ChatBatchGeneration:
+        input_ids = [self.tokenizer.tokenize_chat(item) for item in messages]
+        result = self.engine.run_batch(
+            input_ids, self.tokenizer.eos_token_id, samplings
+        )
+        return ChatBatchGeneration(
+            texts=[self.tokenizer.detokenize(tokens) for tokens in result.output_ids],
+            finish_reasons=result.finish_reasons,
+            prompt_tokens=[len(tokens) for tokens in input_ids],
+            completion_tokens=[len(tokens) for tokens in result.output_ids],
+        )
 
     def run_chat(
         self,

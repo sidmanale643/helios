@@ -8,6 +8,9 @@ from fastapi.concurrency import run_in_threadpool
 
 from helios.api.deps import get_generator
 from helios.api.types import (
+    ChatCompletionBatchItem,
+    ChatCompletionBatchRequest,
+    ChatCompletionBatchResponse,
     ChatCompletionChoice,
     ChatCompletionMessage,
     ChatCompletionPromptTokensDetails,
@@ -21,6 +24,16 @@ from helios.runtime.frontend import TextGenerator
 router = APIRouter()
 logger = logging.getLogger("uvicorn.error")
 GeneratorDependency = Annotated[TextGenerator, Depends(get_generator)]
+
+
+def _messages(payload: ChatCompletionRequest) -> list[tuple[str, str]]:
+    return [
+        (
+            "system" if message.role == "developer" else message.role,
+            message.content,
+        )
+        for message in payload.messages
+    ]
 
 
 @router.get("/health")
@@ -61,13 +74,7 @@ async def chat_completions(
     try:
         result = await run_in_threadpool(
             generator.run_chat,
-            [
-                (
-                    "system" if message.role == "developer" else message.role,
-                    message.content,
-                )
-                for message in payload.messages
-            ],
+            _messages(payload),
             payload.sampling(),
             request_id,
         )
@@ -108,4 +115,39 @@ async def chat_completions(
             decode_seconds=result.decode_seconds,
             store_seconds=result.store_seconds,
         ),
+    )
+
+
+@router.post("/v1/chat/completions/batch", response_model=ChatCompletionBatchResponse)
+async def chat_completions_batch(
+    payload: ChatCompletionBatchRequest,
+    generator: GeneratorDependency,
+) -> ChatCompletionBatchResponse:
+    if any(request.model != generator.model_id for request in payload.requests):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Every request must use the loaded model '{generator.model_id}'.",
+        )
+    try:
+        result = await run_in_threadpool(
+            generator.run_chat_batch,
+            [_messages(request) for request in payload.requests],
+            [request.sampling() for request in payload.requests],
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return ChatCompletionBatchResponse(
+        model=generator.model_id,
+        items=[
+            ChatCompletionBatchItem(
+                index=index,
+                content=text,
+                finish_reason="stop" if finish_reason == "eos" else "length",
+                prompt_tokens=result.prompt_tokens[index],
+                completion_tokens=result.completion_tokens[index],
+            )
+            for index, (text, finish_reason) in enumerate(
+                zip(result.texts, result.finish_reasons, strict=True)
+            )
+        ],
     )

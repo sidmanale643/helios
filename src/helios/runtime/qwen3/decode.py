@@ -143,19 +143,28 @@ class Decoder:
         self,
         input_ids: list[list[int]],
         eos_token_id: int,
-        sampling: Sampling,
+        samplings: list[Sampling],
         *,
         max_total_tokens: int,
     ) -> BatchDecodeResult:
         if not input_ids or any(not tokens for tokens in input_ids):
             raise ValueError("A batch must contain at least one non-empty prompt.")
+        if len(samplings) != len(input_ids):
+            raise ValueError("Every prompt must have sampling settings.")
+        sampling = samplings[0]
+        if any(
+            item.temperature != sampling.temperature or item.top_p != sampling.top_p
+            for item in samplings[1:]
+        ):
+            raise ValueError("Every request in a batch must use the same temperature and top_p.")
 
         batch_size = len(input_ids)
         prompt_lengths = torch.tensor(
             [len(tokens) for tokens in input_ids], device=self.device
         )
         longest_prompt = int(prompt_lengths.max().item())
-        capacity = longest_prompt + sampling.max_new_tokens
+        max_new_tokens = max(item.max_new_tokens for item in samplings)
+        capacity = longest_prompt + max_new_tokens
         if capacity > self.model.config.context_length:
             raise ValueError(
                 f"A padded batch needs {capacity:,} cache positions, but the model "
@@ -188,6 +197,10 @@ class Decoder:
         )
         generated = [[] for _ in input_ids]
         finished = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+        eos_finished = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+        token_limits = torch.tensor(
+            [item.max_new_tokens for item in samplings], device=self.device
+        )
 
         self.model.eval()
         with torch.inference_mode():
@@ -197,22 +210,24 @@ class Decoder:
                 attention_mask=key_mask,
                 position_ids=position_ids,
             )[:, -1, :]
-            for index in range(sampling.max_new_tokens):
+            for _ in range(max_new_tokens):
                 next_token = self._sample(logits, sampling)
                 token_ids = next_token.squeeze(1).tolist()
                 active = ~finished
+                active_rows = active.tolist()
                 for row, token_id in enumerate(token_ids):
-                    if active[row] and token_id != eos_token_id:
+                    if active_rows[row] and token_id != eos_token_id:
                         generated[row].append(token_id)
-                finished |= next_token.squeeze(1).eq(eos_token_id)
-                if finished.all() or index + 1 == sampling.max_new_tokens:
-                    break
-
-                step_mask = active & next_token.squeeze(1).ne(eos_token_id)
-                key_mask = torch.cat((key_mask, step_mask[:, None]), dim=1)
+                eos_finished |= active & next_token.squeeze(1).eq(eos_token_id)
                 generated_counts = torch.tensor(
                     [len(tokens) for tokens in generated], device=self.device
                 )
+                finished = eos_finished | generated_counts.ge(token_limits)
+                if finished.all():
+                    break
+
+                step_mask = ~finished
+                key_mask = torch.cat((key_mask, step_mask[:, None]), dim=1)
                 step_positions = prompt_lengths + generated_counts - 1
                 logits = self._forward(
                     next_token,
@@ -224,7 +239,8 @@ class Decoder:
         return BatchDecodeResult(
             output_ids=generated,
             finish_reasons=[
-                "eos" if is_finished else "length" for is_finished in finished.tolist()
+                "eos" if stopped_on_eos else "length"
+                for stopped_on_eos in eos_finished.tolist()
             ],
         )
 
