@@ -14,15 +14,21 @@ uv run python benchmarks/run.py --label baseline
 uv run python benchmarks/run.py --label kv-cache
 uv run python benchmarks/run.py --label prefix-cache
 uv run python benchmarks/run.py --label torch-compile
+uv run python benchmarks/run.py --label static-batch --batch
 ```
 
 The benchmark never loads, starts, stops, or owns the model. It only calls the
-running server's `/health` and `/v1/chat/completions` endpoints. Use `--base-url`
-or `HELIOS_BASE_URL` when Helios is not listening on `http://127.0.0.1:8000`.
-The label only names the saved result; it does not change the workload.
+running server's `/health`, `/v1/chat/completions`, and
+`/v1/chat/completions/batch` endpoints. Use `--base-url` or `HELIOS_BASE_URL`
+when Helios is not listening on `http://127.0.0.1:8000`. The label only names
+the saved result; it does not change the workload.
 
-The client sends every workload input to the server in order and saves each
-generated output with its metrics. All four workloads run together:
+By default, the client sends every workload input to the server in order. Pass
+`--batch` to send the entire suite through one model-side static batch. Static
+batch records include aggregate batch latency and output throughput. Per-request
+TTFT and throughput are left empty because the static batch currently exposes
+only aggregate timing. The saved record identifies the mode as `sequential` or
+`static-batch`. All four workloads run together:
 
 | Workload | Shape | What it isolates |
 | --- | --- | --- |

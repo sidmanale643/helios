@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
         default=1_800,
         help="Per-request timeout in seconds.",
     )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Run every benchmark request in one model-side static batch.",
+    )
     return parser.parse_args()
 
 
@@ -123,6 +128,64 @@ def run_request(
     }
 
 
+def run_batch(
+    base_url: str,
+    model: str,
+    specs: list[RequestSpec],
+    *,
+    timeout: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    started = time.perf_counter()
+    response = request_json(
+        base_url,
+        "/v1/chat/completions/batch",
+        timeout=timeout,
+        payload={
+            "requests": [
+                {
+                    "model": model,
+                    "messages": [
+                        {"role": role, "content": content}
+                        for role, content in spec.messages
+                    ],
+                    "temperature": 0,
+                    "top_p": 1,
+                    "max_tokens": spec.workload.max_new_tokens,
+                    "stream": False,
+                }
+                for spec in specs
+            ]
+        },
+    )
+    batch_seconds = time.perf_counter() - started
+    items = sorted(response["items"], key=lambda item: item["index"])
+    samples = [
+        {
+            "workload": spec.workload.name,
+            "phase": spec.phase,
+            "input": spec.messages,
+            "output": item["content"],
+            "metrics": {
+                "prompt_tokens": item["prompt_tokens"],
+                "output_tokens": item["completion_tokens"],
+                "end_to_end_seconds": batch_seconds,
+                "time_to_first_token_seconds": None,
+                "generation_tokens_per_second": None,
+                "restored_tokens": 0,
+                "cache_hit_rate": 0,
+            },
+        }
+        for spec, item in zip(specs, items, strict=True)
+    ]
+    total_output_tokens = sum(item["completion_tokens"] for item in items)
+    return samples, {
+        "batch_size": len(specs),
+        "end_to_end_seconds": batch_seconds,
+        "output_tokens": total_output_tokens,
+        "output_tokens_per_second": total_output_tokens / batch_seconds,
+    }
+
+
 def duration(seconds: float) -> str:
     return f"{seconds * 1_000:.1f}ms" if seconds < 1 else f"{seconds:.2f}s"
 
@@ -142,10 +205,12 @@ def report(samples: list[dict[str, Any]], path: Path) -> str:
             name = f"{name}/{sample['phase']}"
         rate = metrics["generation_tokens_per_second"]
         rate_display = f"{rate:.2f}" if rate is not None else "—"
+        ttft = metrics["time_to_first_token_seconds"]
+        ttft_display = duration(ttft) if ttft is not None else "—"
         lines.append(
             f"{name:<28} {metrics['prompt_tokens']:>6} {metrics['output_tokens']:>6} "
             f"{duration(metrics['end_to_end_seconds']):>9} "
-            f"{duration(metrics['time_to_first_token_seconds']):>9} "
+            f"{ttft_display:>9} "
             f"{rate_display:>10} {metrics['cache_hit_rate'] * 100:>6.0f}%"
         )
     lines.extend(["", f"Saved outputs and metrics: {path.relative_to(ROOT)}"])
@@ -157,17 +222,22 @@ def main() -> None:
     health = request_json(args.base_url, "/health", timeout=args.timeout)
     model = health["model"]
 
-    samples = []
-    for workload in WORKLOADS:
-        for request in requests_for(workload):
-            samples.append(
-                run_request(
-                    args.base_url,
-                    model,
-                    request,
-                    timeout=args.timeout,
-                )
-            )
+    requests = [
+        request
+        for workload in WORKLOADS
+        for request in requests_for(workload)
+    ]
+
+    if args.batch:
+        samples, batch_metrics = run_batch(
+            args.base_url, model, requests, timeout=args.timeout
+        )
+    else:
+        samples = [
+            run_request(args.base_url, model, request, timeout=args.timeout)
+            for request in requests
+        ]
+        batch_metrics = None
 
     now = datetime.now(UTC)
     record = {
@@ -179,6 +249,8 @@ def main() -> None:
         "accelerator": {"kind": "cuda", "name": health["memory"]["gpu"]},
         "model": {"id": health["model"], "revision": health["model_revision"]},
         "suite_version": SUITE_VERSION,
+        "execution_mode": "static-batch" if args.batch else "sequential",
+        "batch_metrics": batch_metrics,
         "torch_compile": health["torch_compile"],
         "samples": samples,
     }
