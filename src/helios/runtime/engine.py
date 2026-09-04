@@ -7,6 +7,7 @@ from helios.config import HeliosConfig
 from helios.runtime.check import MemoryChecker
 from helios.runtime.generate import GenerationResult, Generator
 from helios.runtime.load import Loader
+from helios.runtime.qwen3.decode import BatchDecodeResult
 from helios.runtime.types import Sampling
 
 logger = logging.getLogger("uvicorn.error")
@@ -119,3 +120,19 @@ class Engine:
                 (time.perf_counter() - wait_started) * 1_000,
             )
             return result
+
+    def run_batch(
+        self,
+        input_ids: list[list[int]],
+        eos_token_id: int,
+        sampling: Sampling,
+    ) -> BatchDecodeResult:
+        vocabulary_size = self.generator.decoder.model.config.vocab_size
+        if eos_token_id >= vocabulary_size or any(
+            token_id >= vocabulary_size for prompt in input_ids for token_id in prompt
+        ):
+            raise ValueError(
+                f"Token IDs must be smaller than the model vocabulary size ({vocabulary_size:,})."
+            )
+        with self._generation_lock:
+            return self.generator.run_batch(input_ids, eos_token_id, sampling)

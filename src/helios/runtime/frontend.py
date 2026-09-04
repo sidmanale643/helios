@@ -5,7 +5,7 @@ import torch
 
 from helios.runtime.engine import Engine
 from helios.runtime.generate import GenerationResult
-from helios.runtime.types import GenerateRequest, Sampling
+from helios.runtime.types import GenerateBatch, GenerateRequest, Sampling
 from helios.runtime.warmup import (
     COMPILE_WARMUP_OUTPUT_TOKENS,
     COMPILE_WARMUP_PROMPT,
@@ -49,6 +49,20 @@ class TextGenerator:
         input_ids = self.tokenizer.tokenize(request.text)
         result = self._generate(input_ids, request.sampling)
         return self.tokenizer.detokenize(result.output_ids)
+
+    def run_batch(self, batch: GenerateBatch) -> list[str]:
+        sampling = batch.requests[0].sampling
+        if any(request.sampling != sampling for request in batch.requests[1:]):
+            raise ValueError(
+                "Every request in a batch must use the same sampling settings."
+            )
+        input_ids = [
+            self.tokenizer.tokenize(request.text) for request in batch.requests
+        ]
+        result = self.engine.run_batch(
+            input_ids, self.tokenizer.eos_token_id, sampling
+        )
+        return [self.tokenizer.detokenize(tokens) for tokens in result.output_ids]
 
     def run_chat(
         self,

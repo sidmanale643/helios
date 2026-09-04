@@ -10,7 +10,7 @@ from helios.runtime.prefix_cache import (
     PromptBlockView,
     describe_prompt_blocks,
 )
-from helios.runtime.qwen3.decode import Decoder
+from helios.runtime.qwen3.decode import BatchDecodeResult, Decoder
 from helios.runtime.qwen3.model import Qwen3Model
 from helios.runtime.types import Sampling
 
@@ -144,4 +144,27 @@ class Generator:
                 restored_tokens=decoded.restored_tokens,
                 stored_blocks=stored_blocks,
             ),
+        )
+
+    def run_batch(
+        self,
+        input_ids: list[list[int]],
+        eos_token_id: int,
+        sampling: Sampling,
+    ) -> BatchDecodeResult:
+        longest_prompt = max((len(tokens) for tokens in input_ids), default=0)
+        cache_tokens = len(input_ids) * (longest_prompt + sampling.max_new_tokens)
+        request_cache_bytes = cache_tokens * self.cache.bytes_per_token
+        if request_cache_bytes > self.cache.kv_budget_bytes:
+            raise ValueError(
+                f"Batch needs {cache_tokens:,} KV-cache tokens, but the profiled "
+                f"limit is {self.cache.kv_budget_bytes // self.cache.bytes_per_token:,}."
+            )
+        if self.prefix_cache.reserve(request_cache_bytes):
+            torch.cuda.empty_cache()
+        return self.decoder.generate_batch(
+            input_ids,
+            eos_token_id,
+            sampling,
+            max_total_tokens=self.cache.kv_budget_bytes // self.cache.bytes_per_token,
         )

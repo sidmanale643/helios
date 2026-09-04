@@ -24,6 +24,12 @@ class DecodeResult:
     cache: KVCache
 
 
+@dataclass
+class BatchDecodeResult:
+    output_ids: list[list[int]]
+    finish_reasons: list[str]
+
+
 class Decoder:
     def __init__(self, model: Qwen3Model, *, torch_compile: bool = False) -> None:
         self.model = model
@@ -131,6 +137,95 @@ class Decoder:
             restore_seconds=restore_seconds,
             restored_tokens=restored_tokens,
             cache=cache,
+        )
+
+    def generate_batch(
+        self,
+        input_ids: list[list[int]],
+        eos_token_id: int,
+        sampling: Sampling,
+        *,
+        max_total_tokens: int,
+    ) -> BatchDecodeResult:
+        if not input_ids or any(not tokens for tokens in input_ids):
+            raise ValueError("A batch must contain at least one non-empty prompt.")
+
+        batch_size = len(input_ids)
+        prompt_lengths = torch.tensor(
+            [len(tokens) for tokens in input_ids], device=self.device
+        )
+        longest_prompt = int(prompt_lengths.max().item())
+        capacity = longest_prompt + sampling.max_new_tokens
+        if capacity > self.model.config.context_length:
+            raise ValueError(
+                f"A padded batch needs {capacity:,} cache positions, but the model "
+                f"supports {self.model.config.context_length:,}."
+            )
+        if batch_size * capacity > max_total_tokens:
+            raise ValueError(
+                f"Batch needs {batch_size * capacity:,} KV-cache tokens, but the "
+                f"profiled limit is {max_total_tokens:,}."
+            )
+
+        token_tensor = torch.full(
+            (batch_size, longest_prompt),
+            eos_token_id,
+            dtype=torch.long,
+            device=self.device,
+        )
+        key_mask = torch.zeros(
+            (batch_size, longest_prompt), dtype=torch.bool, device=self.device
+        )
+        position_ids = torch.zeros_like(token_tensor)
+        for row, tokens in enumerate(input_ids):
+            start = longest_prompt - len(tokens)
+            token_tensor[row, start:] = torch.tensor(tokens, device=self.device)
+            key_mask[row, start:] = True
+            position_ids[row, start:] = torch.arange(len(tokens), device=self.device)
+
+        cache = KVCache(
+            self.model.config, capacity, device=self.device, batch_size=batch_size
+        )
+        generated = [[] for _ in input_ids]
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+
+        self.model.eval()
+        with torch.inference_mode():
+            logits = self._forward(
+                token_tensor,
+                cache=cache,
+                attention_mask=key_mask,
+                position_ids=position_ids,
+            )[:, -1, :]
+            for index in range(sampling.max_new_tokens):
+                next_token = self._sample(logits, sampling)
+                token_ids = next_token.squeeze(1).tolist()
+                active = ~finished
+                for row, token_id in enumerate(token_ids):
+                    if active[row] and token_id != eos_token_id:
+                        generated[row].append(token_id)
+                finished |= next_token.squeeze(1).eq(eos_token_id)
+                if finished.all() or index + 1 == sampling.max_new_tokens:
+                    break
+
+                step_mask = active & next_token.squeeze(1).ne(eos_token_id)
+                key_mask = torch.cat((key_mask, step_mask[:, None]), dim=1)
+                generated_counts = torch.tensor(
+                    [len(tokens) for tokens in generated], device=self.device
+                )
+                step_positions = prompt_lengths + generated_counts - 1
+                logits = self._forward(
+                    next_token,
+                    cache=cache,
+                    attention_mask=key_mask,
+                    position_ids=step_positions[:, None].clamp_min(0),
+                )[:, -1, :]
+
+        return BatchDecodeResult(
+            output_ids=generated,
+            finish_reasons=[
+                "eos" if is_finished else "length" for is_finished in finished.tolist()
+            ],
         )
 
     @property
