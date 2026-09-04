@@ -38,10 +38,13 @@ class MemoryReport:
 
 
 class MemoryChecker:
-    dtype = torch.float16
-
     def __init__(self, config: HeliosConfig) -> None:
         self.config = config
+        self.dtype = (
+            torch.bfloat16
+            if torch.cuda.is_bf16_supported(including_emulation=False)
+            else torch.float16
+        )
 
     def weights(self) -> MemoryReport:
         index = self._gpu()
