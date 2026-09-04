@@ -1,7 +1,7 @@
 from helios.config import get_config
 from helios.runtime.engine import Engine
 from helios.runtime.frontend import TextGenerator
-from helios.runtime.types import GenerateRequest
+from helios.runtime.types import GenerateBatch, GenerateRequest, Sampling
 from helios.runtime.worker import Tokenizer
 
 prompts = [
@@ -16,7 +16,14 @@ def main() -> None:
         Tokenizer.load(config),
         Engine(config),
     )
-    responses = [generator.run(GenerateRequest(text=prompt)) for prompt in prompts]
+    sampling = Sampling()
+    responses = generator.run_batch(
+        GenerateBatch(
+            requests=[
+                GenerateRequest(text=prompt, sampling=sampling) for prompt in prompts
+            ]
+        )
+    )
 
     for prompt, response in zip(prompts, responses, strict=True):
         print(f"Prompt: {prompt}\n\nResponse: {response}\n")

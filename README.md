@@ -131,7 +131,7 @@ text = generator.run(
 print(text)
 ```
 
-For a small multi-prompt example:
+For a small static batch that runs several prompts in the same model forwards:
 
 ```bash
 uv run python run_batch.py
