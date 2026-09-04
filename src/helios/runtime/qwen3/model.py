@@ -20,7 +20,13 @@ class Qwen3Model(nn.Module):
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
-    def forward(self, input_ids: torch.Tensor, cache: KVCache | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        cache: KVCache | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         start_pos = cache.length if cache is not None else 0
         end_pos = start_pos + input_ids.shape[-1]
         if end_pos > self.config.context_length:
@@ -32,10 +38,14 @@ class Qwen3Model(nn.Module):
             query_positions = torch.arange(start_pos, end_pos, device=x.device)
             key_positions = torch.arange(end_pos, device=x.device)
             mask = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
+        if attention_mask is not None:
+            key_mask = attention_mask[:, None, None, :]
+            mask = key_mask if mask is None else mask[None, None, :, :] & key_mask
         for index, block in enumerate(self.blocks):
             x = block(
                 x, mask, self.cos, self.sin,
                 start_pos=start_pos, cache=cache, layer_index=index,
+                position_ids=position_ids,
             )
         if cache is not None:
             cache.advance(tokens)

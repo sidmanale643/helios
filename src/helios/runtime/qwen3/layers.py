@@ -41,13 +41,22 @@ def rope_parameters(config: Qwen3Config) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def apply_rope(
-    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, *, start_pos: int = 0
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    start_pos: int = 0,
+    position_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     _, _, sequence_length, head_dim = x.shape
     if head_dim % 2:
         raise ValueError("Qwen3 RoPE requires an even head dimension.")
-    cos = cos[start_pos : start_pos + sequence_length].unsqueeze(0).unsqueeze(0)
-    sin = sin[start_pos : start_pos + sequence_length].unsqueeze(0).unsqueeze(0)
+    if position_ids is None:
+        cos = cos[start_pos : start_pos + sequence_length].unsqueeze(0).unsqueeze(0)
+        sin = sin[start_pos : start_pos + sequence_length].unsqueeze(0).unsqueeze(0)
+    else:
+        cos = cos[position_ids].unsqueeze(1)
+        sin = sin[position_ids].unsqueeze(1)
     first, second = x[..., : head_dim // 2], x[..., head_dim // 2 :]
     return (x * cos + torch.cat((-second, first), dim=-1) * sin).to(x.dtype)
 
@@ -78,13 +87,26 @@ class GroupedQueryAttention(nn.Module):
         start_pos: int = 0,
         cache: KVCache | None = None,
         layer_index: int = 0,
+        position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size, tokens, _ = x.shape
         queries = self.query(x).view(batch_size, tokens, self.n_heads, self.head_dim).transpose(1, 2)
         keys = self.key(x).view(batch_size, tokens, self.n_kv_heads, self.head_dim).transpose(1, 2)
         values = self.value(x).view(batch_size, tokens, self.n_kv_heads, self.head_dim).transpose(1, 2)
-        queries = apply_rope(self.q_norm(queries), cos, sin, start_pos=start_pos)
-        keys = apply_rope(self.k_norm(keys), cos, sin, start_pos=start_pos)
+        queries = apply_rope(
+            self.q_norm(queries),
+            cos,
+            sin,
+            start_pos=start_pos,
+            position_ids=position_ids,
+        )
+        keys = apply_rope(
+            self.k_norm(keys),
+            cos,
+            sin,
+            start_pos=start_pos,
+            position_ids=position_ids,
+        )
         if cache is not None:
             keys, values = cache.append(layer_index, keys, values)
         context = torch.nn.functional.scaled_dot_product_attention(
@@ -117,9 +139,11 @@ class TransformerBlock(nn.Module):
         start_pos: int = 0,
         cache: KVCache | None = None,
         layer_index: int = 0,
+        position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = x + self.attention(
             self.input_norm(x), mask, cos, sin,
             start_pos=start_pos, cache=cache, layer_index=layer_index,
+            position_ids=position_ids,
         )
         return x + self.feed_forward(self.post_attention_norm(x))
