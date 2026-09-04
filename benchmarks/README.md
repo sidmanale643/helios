@@ -28,7 +28,9 @@ By default, the client sends every workload input to the server in order. Pass
 batch records include aggregate batch latency and output throughput. Per-request
 TTFT and throughput are left empty because the static batch currently exposes
 only aggregate timing. The saved record identifies the mode as `sequential` or
-`static-batch`. All four workloads run together:
+`static-batch`. There are no concurrent client request modes. The runner prints
+each response as soon as the endpoint returns it, then prints the metrics after
+all requests finish. All four workloads run together:
 
 | Workload | Shape | What it isolates |
 | --- | --- | --- |

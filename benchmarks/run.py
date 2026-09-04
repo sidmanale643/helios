@@ -190,7 +190,26 @@ def duration(seconds: float) -> str:
     return f"{seconds * 1_000:.1f}ms" if seconds < 1 else f"{seconds:.2f}s"
 
 
-def report(samples: list[dict[str, Any]], path: Path) -> str:
+def request_name(sample: dict[str, Any]) -> str:
+    name = sample["workload"]
+    if sample["phase"] not in {"uncached", "cold"}:
+        name = f"{name}/{sample['phase']}"
+    return name
+
+
+def print_response(index: int, total: int, sample: dict[str, Any]) -> None:
+    print(
+        f"\n[{index}/{total}] {request_name(sample)} response:\n"
+        f"{sample['output']}",
+        flush=True,
+    )
+
+
+def report(
+    samples: list[dict[str, Any]],
+    path: Path,
+    batch_metrics: dict[str, Any] | None = None,
+) -> str:
     lines = [
         "",
         "Helios benchmark results",
@@ -200,9 +219,7 @@ def report(samples: list[dict[str, Any]], path: Path) -> str:
     ]
     for sample in samples:
         metrics = sample["metrics"]
-        name = sample["workload"]
-        if sample["phase"] not in {"uncached", "cold"}:
-            name = f"{name}/{sample['phase']}"
+        name = request_name(sample)
         rate = metrics["generation_tokens_per_second"]
         rate_display = f"{rate:.2f}" if rate is not None else "—"
         ttft = metrics["time_to_first_token_seconds"]
@@ -213,14 +230,30 @@ def report(samples: list[dict[str, Any]], path: Path) -> str:
             f"{ttft_display:>9} "
             f"{rate_display:>10} {metrics['cache_hit_rate'] * 100:>6.0f}%"
         )
+    if batch_metrics is not None:
+        lines.extend(
+            [
+                "",
+                "Static batch metrics",
+                f"Batch size: {batch_metrics['batch_size']}",
+                f"Output tokens: {batch_metrics['output_tokens']}",
+                f"End-to-end: {duration(batch_metrics['end_to_end_seconds'])}",
+                (
+                    "Output throughput: "
+                    f"{batch_metrics['output_tokens_per_second']:.2f} tok/s"
+                ),
+            ]
+        )
     lines.extend(["", f"Saved outputs and metrics: {path.relative_to(ROOT)}"])
     return "\n".join(lines)
 
 
 def main() -> None:
     args = parse_args()
+    print(f"Checking Helios at {args.base_url} ...", flush=True)
     health = request_json(args.base_url, "/health", timeout=args.timeout)
     model = health["model"]
+    print(f"Model loaded: {model}", flush=True)
 
     requests = [
         request
@@ -229,14 +262,28 @@ def main() -> None:
     ]
 
     if args.batch:
+        print(
+            f"Running one batch of {len(requests)} requests ...",
+            flush=True,
+        )
         samples, batch_metrics = run_batch(
             args.base_url, model, requests, timeout=args.timeout
         )
+        for index, sample in enumerate(samples, start=1):
+            print_response(index, len(samples), sample)
     else:
-        samples = [
-            run_request(args.base_url, model, request, timeout=args.timeout)
-            for request in requests
-        ]
+        samples = []
+        for index, request in enumerate(requests, start=1):
+            print(
+                f"\n[{index}/{len(requests)}] Running "
+                f"{request.workload.name}/{request.phase} ...",
+                flush=True,
+            )
+            sample = run_request(
+                args.base_url, model, request, timeout=args.timeout
+            )
+            samples.append(sample)
+            print_response(index, len(requests), sample)
         batch_metrics = None
 
     now = datetime.now(UTC)
@@ -261,7 +308,7 @@ def main() -> None:
     )
     path = RESULTS / f"{now.strftime('%Y%m%dT%H%M%SZ')}-{safe_label}.json"
     path.write_text(json.dumps(record, indent=2) + "\n")
-    print(report(samples, path))
+    print(report(samples, path, batch_metrics))
 
 
 if __name__ == "__main__":

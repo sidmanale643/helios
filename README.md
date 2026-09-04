@@ -131,12 +131,6 @@ text = generator.run(
 print(text)
 ```
 
-For a small static batch that runs several prompts in the same model forwards:
-
-```bash
-uv run python run_batch.py
-```
-
 ## How it works
 
 ```mermaid
@@ -225,7 +219,6 @@ src/helios/
 ├── config.py            # Environment-backed runtime configuration
 └── main.py              # Local server entry point
 benchmarks/              # Repeatable performance runner
-run_batch.py             # Direct Python example
 ```
 
 ## Current scope
