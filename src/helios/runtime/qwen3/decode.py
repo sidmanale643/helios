@@ -28,6 +28,8 @@ class DecodeResult:
 class BatchDecodeResult:
     output_ids: list[list[int]]
     finish_reasons: list[str]
+    prefill_seconds: float = 0.0
+    decode_seconds: float = 0.0
 
 
 class Decoder:
@@ -65,10 +67,11 @@ class Decoder:
         cached_blocks = prefix_hit.blocks if prefix_hit is not None else ()
         if prefix_hit is not None:
             if any(
-                len(block.tokens) != block.snapshot.length
-                for block in cached_blocks
+                len(block.tokens) != block.snapshot.length for block in cached_blocks
             ):
-                raise ValueError("Prefix-cache token and KV block lengths do not match.")
+                raise ValueError(
+                    "Prefix-cache token and KV block lengths do not match."
+                )
             cached_tokens = tuple(
                 token for block in cached_blocks for token in block.tokens
             )
@@ -156,7 +159,9 @@ class Decoder:
             item.temperature != sampling.temperature or item.top_p != sampling.top_p
             for item in samplings[1:]
         ):
-            raise ValueError("Every request in a batch must use the same temperature and top_p.")
+            raise ValueError(
+                "Every request in a batch must use the same temperature and top_p."
+            )
 
         batch_size = len(input_ids)
         prompt_lengths = torch.tensor(
@@ -180,7 +185,10 @@ class Decoder:
         logger.info(
             "batch_prefill_started batch_size=%d padded_prompt_tokens=%d "
             "max_new_tokens=%d kv_cache_tokens=%d",
-            batch_size, longest_prompt, max_new_tokens, batch_size * capacity,
+            batch_size,
+            longest_prompt,
+            max_new_tokens,
+            batch_size * capacity,
         )
         token_tensor = torch.full(
             (batch_size, longest_prompt),
@@ -210,14 +218,21 @@ class Decoder:
 
         self.model.eval()
         with torch.inference_mode():
+            self._synchronize()
+            prefill_started = time.perf_counter()
             logits = self._forward(
                 token_tensor,
                 cache=cache,
                 attention_mask=key_mask,
                 position_ids=position_ids,
             )[:, -1, :]
+            decode_started = 0.0
             for index in range(max_new_tokens):
                 next_token = self._sample(logits, sampling)
+                if index == 0:
+                    self._synchronize()
+                    prefill_seconds = time.perf_counter() - prefill_started
+                    decode_started = time.perf_counter()
                 token_ids = next_token.squeeze(1).tolist()
                 if index == 0:
                     logger.info(
@@ -256,12 +271,17 @@ class Decoder:
                     position_ids=step_positions[:, None].clamp_min(0),
                 )[:, -1, :]
 
+            self._synchronize()
+            decode_seconds = time.perf_counter() - decode_started if index > 0 else 0.0
+
         return BatchDecodeResult(
             output_ids=generated,
             finish_reasons=[
                 "eos" if stopped_on_eos else "length"
                 for stopped_on_eos in eos_finished.tolist()
             ],
+            prefill_seconds=prefill_seconds,
+            decode_seconds=decode_seconds,
         )
 
     @property

@@ -171,3 +171,40 @@ class Generator:
             samplings,
             max_total_tokens=self.cache.kv_budget_bytes // self.cache.bytes_per_token,
         )
+
+    def run_scheduled_batch(
+        self,
+        input_ids: list[list[int]],
+        eos_token_id: int,
+        samplings: list[Sampling],
+    ) -> list[GenerationResult]:
+        decoded = self.run_batch(input_ids, eos_token_id, samplings)
+        results: list[GenerationResult] = []
+        for tokens, output_ids, finish_reason in zip(
+            input_ids,
+            decoded.output_ids,
+            decoded.finish_reasons,
+            strict=True,
+        ):
+            results.append(
+                GenerationResult(
+                    output_ids=output_ids,
+                    finish_reason=finish_reason,
+                    prefill_seconds=decoded.prefill_seconds,
+                    inter_token_seconds=[decoded.decode_seconds],
+                    restore_seconds=0.0,
+                    prefix_lookup_seconds=0.0,
+                    store_seconds=0.0,
+                    queue_seconds=0.0,
+                    prefix=PrefixTrace(
+                        block_size=self.prefix_cache.block_size,
+                        prompt_blocks=describe_prompt_blocks(
+                            tokens, self.prefix_cache.block_size, None
+                        ),
+                        hit_tokens=0,
+                        restored_tokens=0,
+                        stored_blocks=0,
+                    ),
+                )
+            )
+        return results
