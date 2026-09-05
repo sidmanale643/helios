@@ -30,6 +30,19 @@ PREFILL_INPUT = "\n\n".join(PREFILL_CONTEXT for _ in range(5)) + (
 
 BALANCED_INPUT = COMPILE_WARMUP_PROMPT
 
+BALANCED_INPUTS = (
+    "Explain how to roll out a database index safely, including how to measure whether it helped.",
+    "Draft a concise incident update for a partial API outage, including current impact and the next checkpoint.",
+    "Compare optimistic locking and pessimistic locking for a booking system with concurrent updates.",
+    "Outline a practical plan to find and reduce duplicate background jobs in a Python service.",
+    "Explain how a service can distinguish an empty search result from an unavailable dependency.",
+    "Propose three metrics for detecting a growing queue backlog and explain what each one reveals.",
+    "Describe a safe migration path from a single cache key to versioned cache keys.",
+    "Write a short runbook for responding to elevated database connection-pool exhaustion.",
+    "Explain how idempotency keys protect payment or refund operations during client retries.",
+    "Suggest a staged approach to adding tracing to an API and its background workers.",
+)
+
 AGENT_SYSTEM = """
 You are an operations assistant for a multi-tenant commerce platform. Decide which tools to use,
 keep tenant data isolated, and explain the final action briefly. Never invent tool results. Read
@@ -95,12 +108,12 @@ class Workload:
 
 
 WORKLOADS = (
-    Workload(
-        "prefill-long",
-        "Long input with a short output.",
-        (("user", PREFILL_INPUT),),
-        8,
-    ),
+    # Workload(
+    #     "prefill-long",
+    #     "Long input with a short output.",
+    #     (("user", PREFILL_INPUT),),
+    #     8,
+    # ),
     Workload(
         "decode-long",
         "Short input with a long output.",
@@ -112,6 +125,15 @@ WORKLOADS = (
         "Medium input with a medium output.",
         (("user", BALANCED_INPUT),),
         64,
+    ),
+    *(
+        Workload(
+            f"balanced-{index}",
+            "Medium input with a medium output.",
+            (("user", prompt),),
+            64,
+        )
+        for index, prompt in enumerate(BALANCED_INPUTS, start=1)
     ),
     Workload(
         "agent-prefix",
