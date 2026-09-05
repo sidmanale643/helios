@@ -1,3 +1,4 @@
+import asyncio
 import time
 from dataclasses import dataclass
 
@@ -38,7 +39,6 @@ class ChatBatchGeneration:
 
 
 class TextGenerator:
-
     def __init__(self, tokenizer: Tokenizer, engine: Engine) -> None:
         self.tokenizer = tokenizer
         self.engine = engine
@@ -57,10 +57,11 @@ class TextGenerator:
         self,
         messages: list[list[tuple[str, str]]],
         samplings: list[Sampling],
+        request_id: str = "internal-batch",
     ) -> ChatBatchGeneration:
         input_ids = [self.tokenizer.tokenize_chat(item) for item in messages]
         result = self.engine.run_batch(
-            input_ids, self.tokenizer.eos_token_id, samplings
+            input_ids, self.tokenizer.eos_token_id, samplings, request_id
         )
         return ChatBatchGeneration(
             texts=[self.tokenizer.detokenize(tokens) for tokens in result.output_ids],
@@ -75,10 +76,44 @@ class TextGenerator:
         sampling: Sampling,
         request_id: str | None = None,
     ) -> ChatGeneration:
+        input_ids, tokenize_seconds = self._tokenize_chat(messages)
+        result = self._generate(input_ids, sampling, request_id=request_id)
+        return self._chat_generation(input_ids, tokenize_seconds, result)
+
+    async def run_chat_async(
+        self,
+        messages: list[tuple[str, str]],
+        sampling: Sampling,
+        request_id: str | None = None,
+    ) -> ChatGeneration:
+        input_ids, tokenize_seconds = await asyncio.to_thread(
+            self._tokenize_chat, messages
+        )
+        future = self.engine.enqueue(
+            input_ids,
+            self.tokenizer.eos_token_id,
+            sampling,
+            request_id=request_id,
+        )
+        result = await asyncio.wrap_future(future)
+        return await asyncio.to_thread(
+            self._chat_generation, input_ids, tokenize_seconds, result
+        )
+
+    def _tokenize_chat(
+        self, messages: list[tuple[str, str]]
+    ) -> tuple[list[int], float]:
         tokenize_started = time.perf_counter()
         input_ids = self.tokenizer.tokenize_chat(messages)
         tokenize_seconds = time.perf_counter() - tokenize_started
-        result = self._generate(input_ids, sampling, request_id=request_id)
+        return input_ids, tokenize_seconds
+
+    def _chat_generation(
+        self,
+        input_ids: list[int],
+        tokenize_seconds: float,
+        result: GenerationResult,
+    ) -> ChatGeneration:
         return ChatGeneration(
             text=self.tokenizer.detokenize(result.output_ids),
             finish_reason=result.finish_reason,
@@ -98,13 +133,14 @@ class TextGenerator:
         if self._warmed:
             return
 
-        input_ids = self.tokenizer.tokenize_chat(
-            [("user", COMPILE_WARMUP_PROMPT)]
-        )
+        input_ids = self.tokenizer.tokenize_chat([("user", COMPILE_WARMUP_PROMPT)])
         extended_ids = self.tokenizer.tokenize_chat(
             [
                 ("user", COMPILE_WARMUP_PROMPT),
-                ("assistant", "Start with transaction integrity and cache invalidation."),
+                (
+                    "assistant",
+                    "Start with transaction integrity and cache invalidation.",
+                ),
                 ("user", "Explain the rollout steps and how to measure their success."),
             ]
         )
@@ -187,4 +223,8 @@ class TextGenerator:
                 "warmed": self._warmed and self.engine.torch_compile,
             },
             "memory": self.engine.report.as_dict(),
+            "scheduler": self.engine.scheduler_snapshot(),
         }
+
+    def close(self) -> None:
+        self.engine.close()

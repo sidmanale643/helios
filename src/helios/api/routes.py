@@ -20,6 +20,7 @@ from helios.api.types import (
     ChatCompletionUsage,
 )
 from helios.runtime.frontend import TextGenerator
+from helios.runtime.scheduler import QueueFullError, SchedulerClosedError
 
 router = APIRouter()
 logger = logging.getLogger("uvicorn.error")
@@ -78,12 +79,14 @@ async def chat_completions(
             detail=f"Model '{payload.model}' is not loaded. Use '{generator.model_id}'.",
         )
     try:
-        result = await run_in_threadpool(
-            generator.run_chat,
+        result = await generator.run_chat_async(
             _messages(payload),
             payload.sampling(),
             request_id,
         )
+    except (QueueFullError, SchedulerClosedError) as error:
+        logger.warning("request_rejected request_id=%s reason=unavailable", request_id)
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except ValueError as error:
         logger.warning(
             "request_rejected request_id=%s reason=invalid_request detail=%s",
@@ -130,7 +133,9 @@ async def _chat_completions_batch(
 ) -> ChatCompletionBatchResponse:
     batch_id = f"batch-{uuid.uuid4().hex}"
     started = time.perf_counter()
-    logger.info("batch_received batch_id=%s batch_size=%d", batch_id, len(payload.requests))
+    logger.info(
+        "batch_received batch_id=%s batch_size=%d", batch_id, len(payload.requests)
+    )
     if any(request.model != generator.model_id for request in payload.requests):
         logger.warning("batch_rejected batch_id=%s reason=model_not_loaded", batch_id)
         raise HTTPException(
@@ -142,7 +147,11 @@ async def _chat_completions_batch(
             generator.run_chat_batch,
             [_messages(request) for request in payload.requests],
             [request.sampling() for request in payload.requests],
+            batch_id,
         )
+    except (QueueFullError, SchedulerClosedError) as error:
+        logger.warning("batch_rejected batch_id=%s reason=unavailable", batch_id)
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except ValueError as error:
         logger.warning("batch_rejected batch_id=%s detail=%s", batch_id, error)
         raise HTTPException(status_code=422, detail=str(error)) from error
