@@ -148,6 +148,7 @@ class Engine:
                 max_batch_size=self._max_batch_size,
                 max_tokens=capacity.max_tokens,
                 budget_tokens=capacity.kv_budget_bytes // capacity.bytes_per_token,
+                prefill_chunk_size=self._prefill_chunk_size,
             )
 
     def run_warmup(
@@ -191,25 +192,13 @@ class Engine:
     ) -> bool:
         with self._generation_lock:
             self._drop_cancelled_active()
-            scheduler.peek()
+            self._admit_requests(scheduler)
             if self._active_requests:
                 try:
-                    self._decode_active_requests()
+                    self._run_mixed_batch()
                 except Exception as error:
                     self._fail_active_requests(error)
-
-            prefill_budget = self._prefill_chunk_size
-            while True:
-                self._admit_requests(scheduler)
-                prefill_budget, released_capacity = self._prefill_active_requests(
-                    prefill_budget
-                )
-                if prefill_budget == 0:
-                    if released_capacity:
-                        self._admit_requests(scheduler)
-                    break
-                if not released_capacity:
-                    break
+            self._admit_requests(scheduler)
             scheduler.set_active(tuple(active.job for active in self._active_requests))
             return bool(self._active_requests or scheduler.peek() is not None)
 
@@ -328,65 +317,48 @@ class Engine:
             prefill_state = None
             self.generator.reserve_active_cache(self._reserved_memory_bytes())
 
-    def _prefill_active_requests(self, budget: int) -> tuple[int, bool]:
-        removed_ids: set[int] = set()
+    def _run_mixed_batch(self) -> None:
+        decoding = [
+            active
+            for active in self._active_requests
+            if active.pending_token_id is not None
+        ]
+        selected = list(decoding)
+        chunks = [[active.pending_token_id] for active in decoding]
+        budget = max(self._prefill_chunk_size, len(decoding) + 1) - len(decoding)
         pending = [
-            active for active in self._active_requests
+            active
+            for active in self._active_requests
             if active.pending_token_id is None
         ]
+        now = time.perf_counter()
         while pending and budget > 0:
-            now = time.perf_counter()
             aged = [
-                active for active in pending
+                active
+                for active in pending
                 if now - active.prefill_wait_started >= PREFILL_MAX_WAIT_SECONDS
             ]
             fitting = [
-                active for active in pending
+                active
+                for active in pending
                 if len(active.request.input_ids) - active.prompt_offset <= budget
             ]
             active = (
                 min(aged, key=lambda item: item.prefill_wait_started)
-                if aged else (fitting or pending)[0]
+                if aged
+                else (fitting or pending)[0]
             )
-            pending = [item for item in pending if item is not active]
-            try:
-                chunk_size = min(
-                    budget, len(active.request.input_ids) - active.prompt_offset
-                )
-                if chunk_size < 1:
-                    raise RuntimeError("An unfinished prefill has no prompt tokens left.")
-                chunk = active.request.input_ids[
-                    active.prompt_offset : active.prompt_offset + chunk_size
+            pending.remove(active)
+            count = min(budget, len(active.request.input_ids) - active.prompt_offset)
+            selected.append(active)
+            chunks.append(
+                active.request.input_ids[
+                    active.prompt_offset : active.prompt_offset + count
                 ]
-                logits, elapsed = self.generator.decoder.prefill_chunk(
-                    active.cache, chunk
-                )
-                active.prompt_offset += chunk_size
-                active.prefill_seconds += elapsed
-                active.prefill_wait_started = time.perf_counter()
-                budget -= chunk_size
-                if active.prompt_offset < len(active.request.input_ids):
-                    continue
-                token_id = int(
-                    self.generator.decoder._sample(
-                        logits, active.request.sampling
-                    ).item()
-                )
-                if not self._accept_token(active, token_id, active.queue_seconds):
-                    removed_ids.add(id(active))
-            except Exception as error:
-                self.generator.decoder.release_cache(active.cache)
-                if not active.job.future.done():
-                    active.job.future.set_exception(error)
-                removed_ids.add(id(active))
-        if removed_ids:
-            self._active_requests = [
-                active
-                for active in self._active_requests
-                if id(active) not in removed_ids
-            ]
-            self.generator.reserve_active_cache(self._reserved_memory_bytes())
-        return budget, bool(removed_ids)
+            )
+            budget -= count
+        if selected:
+            self._execute_batch(selected, chunks)
 
     def _decode_active_requests(self) -> None:
         decoding = [
@@ -396,11 +368,16 @@ class Engine:
         ]
         if not decoding:
             return
-        tokens: list[int] = []
-        for active in decoding:
-            if active.pending_token_id is None:
-                raise RuntimeError("A decoding request has no pending token.")
-            tokens.append(active.pending_token_id)
+        self._execute_batch(
+            decoding, [[active.pending_token_id] for active in decoding]
+        )
+
+    def _execute_batch(
+        self, selected: list[_ActiveRequest], chunks: list[list[int]]
+    ) -> None:
+        decoding = [
+            active for active in selected if active.pending_token_id is not None
+        ]
         started = time.perf_counter()
         device = self.generator.decoder.device
         events = None
@@ -419,22 +396,46 @@ class Engine:
                 [active.request.request_id for active in decoding],
                 self._memory_log_fields(self._reserved_memory_bytes()),
             )
-        logits = self.generator.decoder.decode_caches(
-            [active.cache for active in decoding], tokens
-        )
+        if len(decoding) == len(selected):
+            logits = self.generator.decoder.decode_caches(
+                [active.cache for active in selected], [chunk[0] for chunk in chunks]
+            )
+        else:
+            logits = self.generator.decoder.packed_caches(
+                [active.cache for active in selected], chunks
+            )
         if events is not None:
             events[1].record(stream)
-        if all(
-            active.request.sampling.temperature == 0 for active in decoding
-        ):
+        ready = []
+        rows = []
+        for row, (active, chunk) in enumerate(zip(selected, chunks, strict=True)):
+            if active.pending_token_id is None:
+                active.prompt_offset += len(chunk)
+                active.prefill_wait_started = time.perf_counter()
+                if active.prompt_offset < len(active.request.input_ids):
+                    continue
+            ready.append(active)
+            rows.append(row)
+        if not ready:
+            self.generator.decoder._synchronize()
+            elapsed = (
+                events[0].elapsed_time(events[1]) / 1_000
+                if events is not None
+                else time.perf_counter() - started
+            )
+            for active in selected:
+                active.prefill_seconds += elapsed
+            return
+        logits = logits[rows]
+        if all(active.request.sampling.temperature == 0 for active in ready):
             sampled = logits.argmax(dim=-1)
         elif all(
-            active.request.sampling.temperature == decoding[0].request.sampling.temperature
-            and active.request.sampling.top_p == decoding[0].request.sampling.top_p
-            for active in decoding
+            active.request.sampling.temperature == ready[0].request.sampling.temperature
+            and active.request.sampling.top_p == ready[0].request.sampling.top_p
+            for active in ready
         ):
             sampled = self.generator.decoder._sample(
-                logits, decoding[0].request.sampling
+                logits, ready[0].request.sampling
             ).reshape(-1)
         else:
             sampled = torch.cat(
@@ -442,7 +443,7 @@ class Engine:
                     self.generator.decoder._sample(
                         logits[row : row + 1], active.request.sampling
                     ).reshape(-1)
-                    for row, active in enumerate(decoding)
+                    for row, active in enumerate(ready)
                 ]
             )
         token_ids = sampled.cpu().tolist()
@@ -453,21 +454,27 @@ class Engine:
             else time.perf_counter() - started
         )
 
-        surviving: list[_ActiveRequest] = []
-        for active, token_id in zip(decoding, token_ids, strict=True):
-            active.inter_token_seconds.append(elapsed)
-            if self._accept_token(active, token_id, active.queue_seconds, sampled_at):
-                surviving.append(active)
-        surviving_ids = {id(active) for active in surviving}
+        for active in selected:
+            if active.pending_token_id is None:
+                active.prefill_seconds += elapsed
+            else:
+                active.inter_token_seconds.append(elapsed)
+        removed = set()
+        for active, token_id in zip(ready, token_ids, strict=True):
+            if not self._accept_token(
+                active, token_id, active.queue_seconds, sampled_at
+            ):
+                removed.add(id(active))
         self._active_requests = [
-            active
-            for active in self._active_requests
-            if active.pending_token_id is None or id(active) in surviving_ids
+            active for active in self._active_requests if id(active) not in removed
         ]
         self.generator.reserve_active_cache(self._reserved_memory_bytes())
 
     def _accept_token(
-        self, active: _ActiveRequest, token_id: int, queue_seconds: float,
+        self,
+        active: _ActiveRequest,
+        token_id: int,
+        queue_seconds: float,
         sampled_at: float | None = None,
     ) -> bool:
         sampled_at = time.perf_counter() if sampled_at is None else sampled_at
@@ -622,7 +629,8 @@ class Engine:
                 result.elapsed_seconds
                 if result.elapsed_seconds is not None
                 else queue_seconds + generation_seconds
-            ) * 1_000,
+            )
+            * 1_000,
         )
         return result
 

@@ -31,6 +31,7 @@ def warm_decode(
     max_batch_size: int,
     max_tokens: int,
     budget_tokens: int,
+    prefill_chunk_size: int = 256,
 ) -> tuple[int, tuple[int, ...]]:
     sampling = Sampling(temperature=0, top_p=1, max_new_tokens=DECODE_WARMUP_STEPS)
     device = decoder.device
@@ -61,17 +62,37 @@ def warm_decode(
                     baseline = torch.cuda.memory_reserved(device)
                     torch.cuda.reset_peak_memory_stats(device)
                 try:
+                    packed_counts = [
+                        min(
+                            max(1, prefill_chunk_size - batch_size + 1)
+                            if row == 0
+                            else 1,
+                            max(1, capacity - DECODE_WARMUP_STEPS - 4),
+                        )
+                        for row in range(batch_size)
+                    ]
                     for row in range(batch_size):
                         length = (
                             prompt_limit - int(measured) - (row % 2 if mixed else 0)
                         )
+                        if mixed and decoder.page_pool is not None:
+                            length = min(
+                                length,
+                                capacity - DECODE_WARMUP_STEPS - packed_counts[row],
+                            )
                         result = decoder.prefill(
                             input_ids[:length],
                             sampling,
                             max_total_tokens=max_tokens,
                         )
+                        if decoder.page_pool is not None:
+                            result.cache.capacity = capacity
                         caches.append(result.cache)
                         result = None
+                    if mixed and decoder.page_pool is not None:
+                        decoder.packed_caches(
+                            caches, [[input_ids[-1]] * count for count in packed_counts]
+                        )
                     for _ in range(DECODE_WARMUP_STEPS):
                         decoder.decode_caches(caches, [input_ids[-1]] * batch_size)
                     decoder._synchronize()
