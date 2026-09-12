@@ -1,7 +1,7 @@
 import logging
 import time
 from concurrent.futures import Future
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from threading import Lock
 
 import torch
@@ -16,6 +16,7 @@ from helios.runtime.scheduler import Job, Scheduler
 from helios.runtime.types import Sampling
 
 logger = logging.getLogger("uvicorn.error")
+PREFILL_MAX_WAIT_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,10 @@ class _ActiveRequest:
     hit_tokens: int
     restored_tokens: int
     prompt_blocks: tuple[PromptBlockView, ...]
+    prefill_wait_started: float
+    first_token_at: float | None = None
+    last_token_at: float | None = None
+    token_intervals: list[float] = field(default_factory=list)
 
 
 class Engine:
@@ -296,6 +301,7 @@ class Engine:
                 restore_seconds=prefill_state.restore_seconds,
                 hit_tokens=0 if prefix_hit is None else prefix_hit.length,
                 restored_tokens=prefill_state.restored_tokens,
+                prefill_wait_started=job.enqueued_at,
                 prompt_blocks=describe_prompt_blocks(
                     request.input_ids,
                     self.generator.prefix_cache.block_size,
@@ -324,11 +330,25 @@ class Engine:
 
     def _prefill_active_requests(self, budget: int) -> tuple[int, bool]:
         removed_ids: set[int] = set()
-        for active in self._active_requests:
-            if budget == 0:
-                break
-            if active.pending_token_id is not None:
-                continue
+        pending = [
+            active for active in self._active_requests
+            if active.pending_token_id is None
+        ]
+        while pending and budget > 0:
+            now = time.perf_counter()
+            aged = [
+                active for active in pending
+                if now - active.prefill_wait_started >= PREFILL_MAX_WAIT_SECONDS
+            ]
+            fitting = [
+                active for active in pending
+                if len(active.request.input_ids) - active.prompt_offset <= budget
+            ]
+            active = (
+                min(aged, key=lambda item: item.prefill_wait_started)
+                if aged else (fitting or pending)[0]
+            )
+            pending = [item for item in pending if item is not active]
             try:
                 chunk_size = min(
                     budget, len(active.request.input_ids) - active.prompt_offset
@@ -343,17 +363,10 @@ class Engine:
                 )
                 active.prompt_offset += chunk_size
                 active.prefill_seconds += elapsed
+                active.prefill_wait_started = time.perf_counter()
                 budget -= chunk_size
                 if active.prompt_offset < len(active.request.input_ids):
                     continue
-                active.queue_seconds = max(
-                    0.0,
-                    time.perf_counter()
-                    - active.job.enqueued_at
-                    - active.prefix_lookup_seconds
-                    - active.restore_seconds
-                    - active.prefill_seconds,
-                )
                 token_id = int(
                     self.generator.decoder._sample(
                         logits, active.request.sampling
@@ -433,6 +446,7 @@ class Engine:
                 ]
             )
         token_ids = sampled.cpu().tolist()
+        sampled_at = time.perf_counter()
         elapsed = (
             events[0].elapsed_time(events[1]) / 1_000
             if events is not None
@@ -442,7 +456,7 @@ class Engine:
         surviving: list[_ActiveRequest] = []
         for active, token_id in zip(decoding, token_ids, strict=True):
             active.inter_token_seconds.append(elapsed)
-            if self._accept_token(active, token_id, active.queue_seconds):
+            if self._accept_token(active, token_id, active.queue_seconds, sampled_at):
                 surviving.append(active)
         surviving_ids = {id(active) for active in surviving}
         self._active_requests = [
@@ -453,11 +467,18 @@ class Engine:
         self.generator.reserve_active_cache(self._reserved_memory_bytes())
 
     def _accept_token(
-        self, active: _ActiveRequest, token_id: int, queue_seconds: float
+        self, active: _ActiveRequest, token_id: int, queue_seconds: float,
+        sampled_at: float | None = None,
     ) -> bool:
+        sampled_at = time.perf_counter() if sampled_at is None else sampled_at
+        if active.first_token_at is None:
+            active.first_token_at = sampled_at
         if token_id == active.request.eos_token_id:
             self._complete_request(active, "eos", queue_seconds)
             return False
+        if active.last_token_at is not None:
+            active.token_intervals.append(sampled_at - active.last_token_at)
+        active.last_token_at = sampled_at
         active.output_ids.append(token_id)
         if len(active.output_ids) == active.request.sampling.max_new_tokens:
             self._complete_request(active, "length", queue_seconds)
@@ -505,6 +526,10 @@ class Engine:
             self.generator.decoder.release_cache(active.cache)
         store_seconds = time.perf_counter() - store_started
         result = GenerationResult(
+            first_token_at=active.first_token_at,
+            first_token_seconds=active.first_token_at - active.job.enqueued_at,
+            token_intervals=tuple(active.token_intervals),
+            elapsed_seconds=time.perf_counter() - active.job.enqueued_at,
             output_ids=active.output_ids,
             finish_reason=finish_reason,
             prefill_seconds=active.prefill_seconds,
@@ -593,7 +618,11 @@ class Engine:
             )
             * 1_000,
             tokens_per_second,
-            (queue_seconds + generation_seconds) * 1_000,
+            (
+                result.elapsed_seconds
+                if result.elapsed_seconds is not None
+                else queue_seconds + generation_seconds
+            ) * 1_000,
         )
         return result
 

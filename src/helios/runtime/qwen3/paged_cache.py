@@ -177,6 +177,9 @@ class PagedBatchCache:
             raise ValueError("Paged batch caches must share one KV page pool.")
         if len({id(cache) for cache in caches}) != len(caches):
             raise ValueError("Paged batches require distinct request caches.")
+        self._buffers: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._metadata_values: dict[str, list] = {}
+        self._block_signature = None
         self.caches = tuple(caches)
         self.pool = pool
         self.batch_size = len(caches)
@@ -205,10 +208,8 @@ class PagedBatchCache:
 
     def slot_lengths(self, slots: Sequence[int] | torch.Tensor) -> torch.Tensor:
         rows = self.slot_ids(slots)
-        return torch.tensor(
-            [self.caches[row].length for row in rows],
-            dtype=torch.long,
-            device=self.pool.device,
+        return self.metadata(
+            "positions", [self.caches[row].length for row in rows], torch.long
         )
 
     def prepare(self, tokens: int) -> None:
@@ -232,34 +233,53 @@ class PagedBatchCache:
             cache.pages.extend(self.pool.acquire(missing))
             cache._pending_tokens = tokens
         tables = [[page.index for page in cache.pages] for cache in self.caches]
-        width = max(map(len, tables))
-        self.block_table = torch.tensor(
-            [table + [0] * (width - len(table)) for table in tables],
-            dtype=torch.int32,
-            device=self.pool.device,
-        )
+        width = max(_pages_for(cache.capacity, page_size) for cache in self.caches)
+        signature = (width, tuple(tuple(table) for table in tables))
+        if signature != self._block_signature:
+            self.block_table = self.metadata(
+                "block_table",
+                [table + [0] * (width - len(table)) for table in tables],
+                torch.int32,
+            )
+            self._block_signature = signature
         ends = [cache.length + tokens for cache in self.caches]
-        self.seqused_k = torch.tensor(ends, dtype=torch.int32, device=self.pool.device)
-        self.cu_seq_q = torch.tensor(
+        self.seqused_k = self.metadata("seqused_k", ends, torch.int32)
+        self.cu_seq_q = self.metadata(
+            "cu_seq_q",
             [row * tokens for row in range(self.batch_size + 1)],
-            dtype=torch.int32,
-            device=self.pool.device,
+            torch.int32,
         )
-        self.cu_seq_k = torch.tensor(
-            [0, *accumulate(ends)], dtype=torch.int32, device=self.pool.device
-        )
-        self.write_slots = torch.tensor(
+        self.cu_seq_k = self.metadata("cu_seq_k", [0, *accumulate(ends)], torch.int32)
+        self.write_slots = self.metadata(
+            "write_slots",
             [
                 cache.pages[position // page_size].index * page_size
                 + position % page_size
                 for cache in self.caches
                 for position in range(cache.length, cache.length + tokens)
             ],
-            dtype=torch.long,
-            device=self.pool.device,
+            torch.long,
         )
         self.max_q = tokens
         self.max_k = max(ends)
+
+    def metadata(self, name: str, values: list, dtype: torch.dtype) -> torch.Tensor:
+        shape = (
+            (len(values), len(values[0]))
+            if isinstance(values[0], list)
+            else (len(values),)
+        )
+        pair = self._buffers.get(name)
+        if pair is None or pair[0].shape != shape:
+            host = torch.empty(shape, dtype=dtype, device="cpu")
+            device = torch.empty(shape, dtype=dtype, device=self.pool.device)
+            pair = self._buffers[name] = (host, device)
+        host, device = pair
+        if self._metadata_values.get(name) != values:
+            host.numpy()[...] = values
+            device.copy_(host)
+            self._metadata_values[name] = values
+        return device
 
     def advance(
         self, tokens: int, *, slots: Sequence[int] | torch.Tensor | None = None

@@ -21,6 +21,8 @@ PROGRESS_INTERVAL_TOKENS = 32
 
 @dataclass
 class DecodeResult:
+    first_token_at: float
+    token_intervals: tuple[float, ...]
     output_ids: list[int]
     finish_reason: str
     prefill_seconds: float
@@ -49,6 +51,8 @@ class PrefillState:
 
 @dataclass
 class DecodedTokens:
+    first_token_at: float
+    token_intervals: tuple[float, ...]
     output_ids: list[int]
     finish_reason: str
     inter_token_seconds: list[float]
@@ -58,6 +62,7 @@ class Decoder:
     def __init__(self, model: Qwen3Model) -> None:
         self.model = model
         self.page_pool: KVPagePool | None = None
+        self._paged_decode_batch: PagedBatchCache | None = None
 
     def generate(
         self,
@@ -83,6 +88,8 @@ class Decoder:
             self.release_cache(prefill.cache)
             raise
         return DecodeResult(
+            first_token_at=decoded.first_token_at,
+            token_intervals=decoded.token_intervals,
             output_ids=decoded.output_ids,
             finish_reason=decoded.finish_reason,
             prefill_seconds=prefill.prefill_seconds,
@@ -213,21 +220,39 @@ class Decoder:
     ) -> torch.Tensor:
         if not caches or len(caches) != len(token_ids):
             raise ValueError("Every request cache needs exactly one pending token.")
-        tokens = torch.tensor(
-            token_ids, dtype=torch.long, device=self.device
-        ).unsqueeze(1)
         self.model.eval()
         with torch.inference_mode():
             if isinstance(caches[0], PagedKVCache):
-                cache = PagedBatchCache(caches)
-                cache.prepare(1)
-                slots = tuple(range(len(caches)))
-                return self.model(
-                    tokens,
-                    cache=cache,
-                    position_ids=cache.slot_lengths(slots).unsqueeze(1),
-                    cache_slots=slots,
-                )[:, -1, :]
+                if any(
+                    not isinstance(cache, PagedKVCache)
+                    or cache.pool is not caches[0].pool
+                    for cache in caches
+                ):
+                    raise ValueError("Paged decode caches must share one pool.")
+                if len({id(cache) for cache in caches}) != len(caches):
+                    raise ValueError("Paged batches require distinct request caches.")
+                batch = self._paged_decode_batch
+                if batch is None or batch.pool is not caches[0].pool:
+                    batch = self._paged_decode_batch = PagedBatchCache(caches)
+                batch.caches = tuple(caches)
+                batch.batch_size = len(caches)
+                try:
+                    tokens = batch.metadata(
+                        "token_ids", token_ids, torch.long
+                    ).unsqueeze(1)
+                    batch.prepare(1)
+                    slots = tuple(range(len(caches)))
+                    return self.model(
+                        tokens,
+                        cache=batch,
+                        position_ids=batch.slot_lengths(slots).unsqueeze(1),
+                        cache_slots=slots,
+                    )[:, -1, :]
+                finally:
+                    batch.caches = ()
+            tokens = torch.tensor(
+                token_ids, dtype=torch.long, device=self.device
+            ).unsqueeze(1)
             return self._decode_dense(tokens, caches)[:, -1, :]
 
     def _decode_dense(
@@ -267,6 +292,9 @@ class Decoder:
         *,
         request_id: str = "internal",
     ) -> DecodedTokens:
+        first_token_at = None
+        last_token_at = None
+        token_intervals = []
         generated: list[int] = []
         inter_token_seconds: list[float] = []
         finish_reason = "length"
@@ -277,9 +305,15 @@ class Decoder:
             for index in range(sampling.max_new_tokens):
                 next_token = self._sample(logits, sampling)
                 token_id = next_token.item()
+                sampled_at = time.perf_counter()
+                if first_token_at is None:
+                    first_token_at = sampled_at
                 if token_id == eos_token_id:
                     finish_reason = "eos"
                     break
+                if last_token_at is not None:
+                    token_intervals.append(sampled_at - last_token_at)
+                last_token_at = sampled_at
                 generated.append(token_id)
                 generated_tokens = len(generated)
                 if (
@@ -310,6 +344,8 @@ class Decoder:
                     inter_token_seconds.append(time.perf_counter() - started)
                     logits = forward_logits[:, -1, :]
         return DecodedTokens(
+            first_token_at=first_token_at,
+            token_intervals=tuple(token_intervals),
             output_ids=generated,
             finish_reason=finish_reason,
             inter_token_seconds=inter_token_seconds,

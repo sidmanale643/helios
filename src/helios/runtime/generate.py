@@ -48,6 +48,10 @@ class GenerationResult:
     store_seconds: float
     queue_seconds: float
     prefix: PrefixTrace
+    first_token_at: float | None = None
+    first_token_seconds: float | None = None
+    token_intervals: tuple[float, ...] | None = None
+    elapsed_seconds: float | None = None
 
 
 class Generator:
@@ -86,6 +90,7 @@ class Generator:
 
     def release_page_pool(self) -> None:
         self.prefix_cache.clear()
+        self.decoder._paged_decode_batch = None
         self.decoder.page_pool = None
 
     def request_cache_bytes(self, capacity: int) -> int:
@@ -112,6 +117,7 @@ class Generator:
         *,
         request_id: str = "internal",
     ) -> GenerationResult:
+        started = time.perf_counter()
         request_cache_bytes = self.request_cache_bytes(
             len(input_ids) + sampling.max_new_tokens
         )
@@ -164,6 +170,10 @@ class Generator:
             store_seconds * 1_000,
         )
         return GenerationResult(
+            first_token_at=decoded.first_token_at,
+            first_token_seconds=decoded.first_token_at - started,
+            token_intervals=decoded.token_intervals,
+            elapsed_seconds=time.perf_counter() - started,
             output_ids=decoded.output_ids,
             finish_reason=decoded.finish_reason,
             prefill_seconds=decoded.prefill_seconds,
