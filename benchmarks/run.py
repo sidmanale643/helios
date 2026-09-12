@@ -302,6 +302,7 @@ def run_request(
             ),
             "prefill_tokens_per_second": timings.get("prefill_tokens_per_second"),
             "decode_tokens_per_second": timings.get("decode_tokens_per_second"),
+            "decode_compute_tokens_per_second": timings.get("decode_compute_tokens_per_second"),
             "restored_tokens": cached_tokens,
             "cache_hit_rate": timings.get("cache_hit_rate", 0.0),
         },
@@ -339,6 +340,9 @@ def summarize_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
     ttft = numeric_metric(samples, "time_to_first_token_seconds")
     e2e = numeric_metric(samples, "end_to_end_seconds")
     decode_rate = numeric_metric(samples, "decode_tokens_per_second")
+    decode_compute_rate = numeric_metric(
+        samples, "decode_compute_tokens_per_second"
+    )
     prefill_rate = numeric_metric(samples, "prefill_tokens_per_second")
 
     total_max_tokens = sum(sample["metrics"]["max_tokens"] for sample in samples)
@@ -369,6 +373,10 @@ def summarize_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "decode_tokens_per_second": {
             "p50": percentile(decode_rate, 0.50),
             "p95": percentile(decode_rate, 0.95),
+        },
+        "decode_compute_tokens_per_second": {
+            "p50": percentile(decode_compute_rate, 0.50),
+            "p95": percentile(decode_compute_rate, 0.95),
         },
         "prefill_tokens_per_second": {
             "p50": percentile(prefill_rate, 0.50),
@@ -621,17 +629,23 @@ def report(
                 f"{duration(aggregate['e2e_seconds']['p95'])}"
             ),
             (
-                "Per-request decode tok/s p50 / p95: "
+                "Per-request wall-clock decode tok/s p50 / p95: "
                 f"{rate(aggregate['decode_tokens_per_second']['p50'])} / "
                 f"{rate(aggregate['decode_tokens_per_second']['p95'])}"
+            ),
+            (
+                "Per-request compute-only decode tok/s p50 / p95: "
+                f"{rate(aggregate['decode_compute_tokens_per_second']['p50'])} / "
+                f"{rate(aggregate['decode_compute_tokens_per_second']['p95'])}"
             ),
             "",
             "Category summary",
             (
                 f"{'category':<18} {'reqs':>5} {'out':>7} {'cap':>7} "
-                f"{'TTFT p50':>10} {'TTFT p95':>10} {'dec p50':>9}"
+                f"{'TTFT p50':>10} {'TTFT p95':>10} {'wall p50':>9} "
+                f"{'compute p50':>12}"
             ),
-            "-" * 75,
+            "-" * 98,
         ]
     )
 
@@ -643,7 +657,8 @@ def report(
             f"{summary['requests_hitting_max_tokens_rate'] * 100:>6.1f}% "
             f"{duration(summary['ttft_seconds']['p50']):>10} "
             f"{duration(summary['ttft_seconds']['p95']):>10} "
-            f"{rate(summary['decode_tokens_per_second']['p50']):>9}"
+            f"{rate(summary['decode_tokens_per_second']['p50']):>9} "
+            f"{rate(summary['decode_compute_tokens_per_second']['p50']):>12}"
         )
 
     try:

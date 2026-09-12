@@ -60,6 +60,9 @@ class ChatCompletionTimings(BaseModel):
     restore_seconds: float
     prefill_seconds: float
     decode_seconds: float
+    decode_compute_seconds: float
+    decode_compute_tokens_per_second: float | None
+    inter_token_seconds: tuple[float, ...]
     store_seconds: float
     time_to_first_token_seconds: float
     total_seconds: float

@@ -1,6 +1,6 @@
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -28,9 +28,15 @@ class ChatGeneration:
     prefill_seconds: float = 0.0
     decode_seconds: float = 0.0
     store_seconds: float = 0.0
+    first_token_seconds: float | None = None
+    elapsed_seconds: float | None = None
+    decode_compute_seconds: float = 0.0
+    inter_token_seconds: tuple[float, ...] = ()
 
     @property
     def time_to_first_token_seconds(self) -> float:
+        if self.first_token_seconds is not None:
+            return self.first_token_seconds
         return (
             self.tokenize_seconds
             + self.queue_seconds
@@ -41,13 +47,15 @@ class ChatGeneration:
 
     @property
     def total_seconds(self) -> float:
+        if self.elapsed_seconds is not None:
+            return self.elapsed_seconds
         return (
             self.time_to_first_token_seconds + self.decode_seconds + self.store_seconds
         )
 
     @property
     def generation_tokens_per_second(self) -> float | None:
-        generation_seconds = self.prefill_seconds + self.decode_seconds
+        generation_seconds = self.prefill_seconds + self.decode_compute_seconds
         if generation_seconds == 0:
             return None
         return self.completion_tokens / generation_seconds
@@ -63,6 +71,12 @@ class ChatGeneration:
         if self.decode_seconds == 0:
             return None
         return max(0, self.completion_tokens - 1) / self.decode_seconds
+
+    @property
+    def decode_compute_tokens_per_second(self) -> float | None:
+        if self.decode_compute_seconds == 0:
+            return None
+        return max(0, self.completion_tokens - 1) / self.decode_compute_seconds
 
     @property
     def cache_hit_rate(self) -> float:
@@ -91,9 +105,19 @@ class TextGenerator:
         sampling: Sampling,
         request_id: str | None = None,
     ) -> ChatGeneration:
+        started = time.perf_counter()
         input_ids, tokenize_seconds = self._tokenize_chat(messages)
         result = self._generate(input_ids, sampling, request_id=request_id)
-        return self._chat_generation(input_ids, tokenize_seconds, result)
+        chat = self._chat_generation(input_ids, tokenize_seconds, result)
+        return replace(
+            chat,
+            elapsed_seconds=time.perf_counter() - started,
+            first_token_seconds=(
+                result.first_token_at - started
+                if result.first_token_at is not None
+                else chat.first_token_seconds
+            ),
+        )
 
     async def run_chat_async(
         self,
@@ -101,6 +125,7 @@ class TextGenerator:
         sampling: Sampling,
         request_id: str | None = None,
     ) -> ChatGeneration:
+        started = time.perf_counter()
         input_ids, tokenize_seconds = await asyncio.to_thread(
             self._tokenize_chat, messages
         )
@@ -111,8 +136,17 @@ class TextGenerator:
             request_id=request_id,
         )
         result = await asyncio.wrap_future(future)
-        return await asyncio.to_thread(
+        chat = await asyncio.to_thread(
             self._chat_generation, input_ids, tokenize_seconds, result
+        )
+        return replace(
+            chat,
+            elapsed_seconds=time.perf_counter() - started,
+            first_token_seconds=(
+                result.first_token_at - started
+                if result.first_token_at is not None
+                else chat.first_token_seconds
+            ),
         )
 
     def _tokenize_chat(
@@ -140,7 +174,23 @@ class TextGenerator:
             prefix_lookup_seconds=result.prefix_lookup_seconds,
             restore_seconds=result.restore_seconds,
             prefill_seconds=result.prefill_seconds,
-            decode_seconds=sum(result.inter_token_seconds),
+            decode_seconds=sum(
+                result.token_intervals
+                if result.token_intervals is not None
+                else result.inter_token_seconds
+            ),
+            decode_compute_seconds=sum(result.inter_token_seconds),
+            inter_token_seconds=result.token_intervals or (),
+            first_token_seconds=(
+                tokenize_seconds + result.first_token_seconds
+                if result.first_token_seconds is not None
+                else None
+            ),
+            elapsed_seconds=(
+                tokenize_seconds + result.elapsed_seconds
+                if result.elapsed_seconds is not None
+                else None
+            ),
             store_seconds=result.store_seconds,
         )
 
