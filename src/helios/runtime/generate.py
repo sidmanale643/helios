@@ -91,6 +91,7 @@ class Generator:
     def release_page_pool(self) -> None:
         self.prefix_cache.clear()
         self.decoder._paged_decode_batch = None
+        self.decoder._packed_batch = None
         self.decoder.page_pool = None
 
     def request_cache_bytes(self, capacity: int) -> int:

@@ -7,7 +7,7 @@ from torch.nn.attention.bias import causal_lower_right
 from helios.runtime.qwen3.cache import BatchedKVCache, DecodeKVCache, KVCache
 from helios.runtime.qwen3.config import Qwen3Config
 from helios.runtime.qwen3.layers import RMSNorm, TransformerBlock, rope_parameters
-from helios.runtime.qwen3.paged_cache import PagedBatchCache
+from helios.runtime.qwen3.paged_cache import PackedBatchCache, PagedBatchCache
 
 
 class Qwen3Model(nn.Module):
@@ -36,6 +36,8 @@ class Qwen3Model(nn.Module):
         position_ids: torch.Tensor | None = None,
         cache_slots: Sequence[int] | torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if isinstance(cache, PackedBatchCache):
+            return self._forward_packed(input_ids, cache)
         if cache_slots is None:
             return self._forward_uniform_cache(input_ids, cache, position_ids)
 
@@ -86,6 +88,26 @@ class Qwen3Model(nn.Module):
             cache.advance(tokens, slots=cache_slots)
         x = x[:, -1:, :]
         return self.output(self.final_norm(x).to(self.config.dtype))
+
+    def _forward_packed(
+        self, input_ids: torch.Tensor, cache: PackedBatchCache
+    ) -> torch.Tensor:
+        if input_ids.shape != (1, sum(cache.counts)):
+            raise ValueError("Packed input does not match query lengths.")
+        x = self.token_embedding(input_ids)
+        for index, block in enumerate(self.blocks):
+            x = block(
+                x,
+                None,
+                self.cos,
+                self.sin,
+                cache=cache,
+                layer_index=index,
+                position_ids=cache.positions,
+            )
+        cache.advance_packed()
+        x = x.index_select(1, cache.last_indices)
+        return self.output(self.final_norm(x).to(self.config.dtype))[0]
 
     def decode_forward(
         self,

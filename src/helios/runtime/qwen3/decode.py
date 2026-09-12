@@ -10,6 +10,7 @@ from helios.runtime.qwen3.cache import BatchedKVCache, DenseDecodeBatch, KVCache
 from helios.runtime.qwen3.model import Qwen3Model
 from helios.runtime.qwen3.paged_cache import (
     KVPagePool,
+    PackedBatchCache,
     PagedBatchCache,
     PagedKVCache,
 )
@@ -63,6 +64,7 @@ class Decoder:
         self.model = model
         self.page_pool: KVPagePool | None = None
         self._paged_decode_batch: PagedBatchCache | None = None
+        self._packed_batch: PackedBatchCache | None = None
 
     def generate(
         self,
@@ -254,6 +256,35 @@ class Decoder:
                 token_ids, dtype=torch.long, device=self.device
             ).unsqueeze(1)
             return self._decode_dense(tokens, caches)[:, -1, :]
+
+    def packed_caches(
+        self, caches: list[PagedKVCache], chunks: list[list[int]]
+    ) -> torch.Tensor:
+        if (
+            not caches
+            or len(caches) != len(chunks)
+            or any(not chunk for chunk in chunks)
+        ):
+            raise ValueError("Each packed cache needs a nonempty token chunk.")
+        if len({id(cache) for cache in caches}) != len(caches) or any(
+            cache.pool is not caches[0].pool for cache in caches
+        ):
+            raise ValueError("Packed caches must be distinct and share a pool.")
+        with torch.inference_mode():
+            batch = self._packed_batch
+            if batch is None or batch.pool is not caches[0].pool:
+                batch = self._packed_batch = PackedBatchCache(caches)
+            batch.caches, batch.batch_size = tuple(caches), len(caches)
+            try:
+                tokens = batch.metadata(
+                    "token_ids",
+                    [token for chunk in chunks for token in chunk],
+                    torch.long,
+                ).unsqueeze(0)
+                batch.prepare_packed([len(chunk) for chunk in chunks])
+                return self.model(tokens, cache=batch)
+            finally:
+                batch.caches = ()
 
     def _decode_dense(
         self, tokens: torch.Tensor, caches: list[KVCache]

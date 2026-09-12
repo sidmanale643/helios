@@ -406,3 +406,120 @@ def _gather_cpu(
         .permute(1, 0, 2)
         .unsqueeze(0)
     )
+
+
+class PackedBatchCache(PagedBatchCache):
+    def prepare_packed(self, counts: Sequence[int]) -> None:
+        if len(counts) != len(self.caches) or any(count < 1 for count in counts):
+            raise ValueError("Each packed sequence needs at least one query token.")
+        missing = []
+        for cache, count in zip(self.caches, counts, strict=True):
+            if (
+                cache._pending_tokens is not None
+                or cache.length + count > cache.capacity
+            ):
+                raise ValueError(
+                    "Packed append exceeds capacity or an append is pending."
+                )
+            missing.append(
+                max(
+                    0,
+                    _pages_for(cache.length + count, self.pool.page_size)
+                    - len(cache.pages),
+                )
+            )
+        if sum(missing) > self.pool.free_pages:
+            raise RuntimeError("Insufficient free pages for packed append.")
+        for cache, count, pages in zip(self.caches, counts, missing, strict=True):
+            cache.pages.extend(self.pool.acquire(pages))
+            cache._pending_tokens = count
+        self.counts = tuple(counts)
+        offsets = [0, *accumulate(counts)]
+        ends = [
+            cache.length + count
+            for cache, count in zip(self.caches, counts, strict=True)
+        ]
+        tables = [[page.index for page in cache.pages] for cache in self.caches]
+        width = max(
+            _pages_for(cache.capacity, self.pool.page_size) for cache in self.caches
+        )
+        self.block_table = self.metadata(
+            "block_table",
+            [row + [0] * (width - len(row)) for row in tables],
+            torch.int32,
+        )
+        self.cu_seq_q = self.metadata("cu_seq_q", offsets, torch.int32)
+        self.cu_seq_k = self.metadata("cu_seq_k", [0, *accumulate(ends)], torch.int32)
+        self.seqused_k = self.metadata("seqused_k", ends, torch.int32)
+        positions = [
+            position
+            for cache, end in zip(self.caches, ends, strict=True)
+            for position in range(cache.length, end)
+        ]
+        self.positions = self.metadata("positions", positions, torch.long).unsqueeze(0)
+        self.last_indices = self.metadata(
+            "last_indices", [offset - 1 for offset in offsets[1:]], torch.long
+        )
+        self.write_slots = self.metadata(
+            "write_slots",
+            [
+                cache.pages[position // self.pool.page_size].index * self.pool.page_size
+                + position % self.pool.page_size
+                for cache, end in zip(self.caches, ends, strict=True)
+                for position in range(cache.length, end)
+            ],
+            torch.long,
+        )
+        self.max_q, self.max_k = max(counts), max(ends)
+
+    def advance_packed(self) -> None:
+        for cache, count in zip(self.caches, self.counts, strict=True):
+            cache.length += count
+            cache._pending_tokens = None
+
+    def attend(self, layer, queries, keys, values):
+        if queries.shape[0] != 1 or queries.shape[2] != sum(self.counts):
+            raise ValueError("Packed attention expects one flattened token dimension.")
+        self._write(layer, keys, values)
+        if self.pool.device.type == "cuda":
+            output = varlen_attn(
+                queries[0].transpose(0, 1),
+                self.pool.keys[layer],
+                self.pool.values[layer],
+                self.cu_seq_q,
+                self.cu_seq_k,
+                self.max_q,
+                self.max_k,
+                window_size=(-1, 0),
+                enable_gqa=queries.shape[1] > self.pool.config.n_kv_heads,
+                seqused_k=self.seqused_k,
+                block_table=self.block_table,
+                num_splits=1,
+            )
+            return output.transpose(0, 1).unsqueeze(0)
+        outputs = []
+        offset = 0
+        for cache, count in zip(self.caches, self.counts, strict=True):
+            end = cache.length + count
+            k = _gather_cpu(self.pool.keys[layer], cache.pages, end)
+            v = _gather_cpu(self.pool.values[layer], cache.pages, end)
+            repeat = queries.shape[1] // k.shape[1]
+            k, v = (
+                k.repeat_interleave(repeat, dim=1),
+                v.repeat_interleave(repeat, dim=1),
+            )
+            mask = (
+                torch.arange(end)[None, :]
+                <= (cache.length + torch.arange(count))[:, None]
+            )
+            outputs.append(
+                torch.nn.functional.scaled_dot_product_attention(
+                    queries[:, :, offset : offset + count],
+                    k,
+                    v,
+                    attn_mask=mask,
+                    dropout_p=0.0,
+                )
+            )
+            offset += count
+        return torch.cat(outputs, dim=2)
