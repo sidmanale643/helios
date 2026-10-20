@@ -162,6 +162,12 @@ class PagedKVCache:
         self.pages = pages
         self.length = length
 
+    def truncate(self, length: int) -> None:
+        if self._pending_tokens is not None or not 0 <= length <= self.length:
+            raise ValueError("Cannot truncate beyond committed KV tokens.")
+        self.length = length
+        del self.pages[_pages_for(length, self.pool.page_size):]
+
     def close(self) -> None:
         self.pages.clear()
         self.length = 0
@@ -409,6 +415,8 @@ def _gather_cpu(
 
 
 class PackedBatchCache(PagedBatchCache):
+    all_logits = False
+
     def prepare_packed(self, counts: Sequence[int]) -> None:
         if len(counts) != len(self.caches) or any(count < 1 for count in counts):
             raise ValueError("Each packed sequence needs at least one query token.")

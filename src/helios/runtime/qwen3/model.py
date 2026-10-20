@@ -106,7 +106,8 @@ class Qwen3Model(nn.Module):
                 position_ids=cache.positions,
             )
         cache.advance_packed()
-        x = x.index_select(1, cache.last_indices)
+        if not cache.all_logits:
+            x = x.index_select(1, cache.last_indices)
         return self.output(self.final_norm(x).to(self.config.dtype))[0]
 
     def decode_forward(

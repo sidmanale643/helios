@@ -18,6 +18,7 @@ class HeliosConfig:
     max_batch_size: int = 8
     max_queue_size: int = 32
     batch_wait_ms: float = 2.0
+    speculative_tokens: int = 0
     torch_compile: bool = False
     compile_fullgraph: bool = False
     compile_diagnostics: bool = True
@@ -49,6 +50,12 @@ class HeliosConfig:
             or self.prefill_chunk_size < 1
         ):
             raise ValueError("prefill_chunk_size must be a positive integer.")
+        if (
+            not isinstance(self.speculative_tokens, int)
+            or isinstance(self.speculative_tokens, bool)
+            or not 0 <= self.speculative_tokens <= 16
+        ):
+            raise ValueError("speculative_tokens must be an integer from 0 to 16.")
         if self.max_batch_size < 1:
             raise ValueError("max_batch_size must be at least 1.")
         if self.max_queue_size < 1:
@@ -86,6 +93,7 @@ def get_config() -> HeliosConfig:
         max_batch_size=int(os.getenv("HELIOS_MAX_BATCH_SIZE", "8")),
         max_queue_size=int(os.getenv("HELIOS_MAX_QUEUE_SIZE", "32")),
         batch_wait_ms=float(os.getenv("HELIOS_BATCH_WAIT_MS", "2")),
+        speculative_tokens=int(os.getenv("HELIOS_SPECULATIVE_TOKENS", "0")),
         torch_compile=_env_bool("HELIOS_TORCH_COMPILE", False),
         compile_fullgraph=_env_bool("HELIOS_COMPILE_FULLGRAPH", False),
         compile_diagnostics=_env_bool("HELIOS_COMPILE_DIAGNOSTICS", True),

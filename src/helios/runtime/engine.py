@@ -13,6 +13,7 @@ from helios.runtime.load import Loader
 from helios.runtime.prefix_cache import PromptBlockView, describe_prompt_blocks
 from helios.runtime.qwen3.paged_cache import PagedKVCache
 from helios.runtime.scheduler import Job, Scheduler
+from helios.runtime.speculative import propose_ngram
 from helios.runtime.types import Sampling
 
 logger = logging.getLogger("uvicorn.error")
@@ -66,6 +67,7 @@ class Engine:
         self._generation_lock = Lock()
         self._max_batch_size = config.max_batch_size
         self._prefill_chunk_size = config.prefill_chunk_size
+        self._speculative_tokens = config.speculative_tokens
         self._active_requests: list[_ActiveRequest] = []
         self._scheduler: Scheduler[_Request, GenerationResult] = Scheduler(
             self._continuous_tick,
@@ -149,6 +151,7 @@ class Engine:
                 max_tokens=capacity.max_tokens,
                 budget_tokens=capacity.kv_budget_bytes // capacity.bytes_per_token,
                 prefill_chunk_size=self._prefill_chunk_size,
+                speculative=self._speculative_tokens > 0,
             )
 
     def run_warmup(
@@ -327,6 +330,13 @@ class Engine:
             for active in self._active_requests
             if active.pending_token_id is not None
         ]
+        if (
+            self._speculative_tokens
+            and len(decoding) == len(self._active_requests)
+            and all(active.request.sampling.temperature == 0 for active in decoding)
+            and self._run_speculative_batch(decoding)
+        ):
+            return
         selected = list(decoding)
         chunks = [[active.pending_token_id] for active in decoding]
         budget = max(self._prefill_chunk_size, len(decoding) + 1) - len(decoding)
@@ -363,6 +373,66 @@ class Engine:
             budget -= count
         if selected:
             self._execute_batch(selected, chunks)
+
+    def _run_speculative_batch(self, decoding: list[_ActiveRequest]) -> bool:
+        budget = max(self._prefill_chunk_size, len(decoding) + 1) - len(decoding)
+        chunks = []
+        for active in decoding:
+            remaining = active.request.sampling.max_new_tokens - len(active.output_ids)
+            proposals = propose_ngram(
+                active.request.input_ids + active.output_ids,
+                min(self._speculative_tokens, remaining - 1, budget),
+            )
+            chunks.append([active.pending_token_id, *proposals])
+            budget -= len(proposals)
+        if not any(len(chunk) > 1 for chunk in chunks):
+            return False
+        starts = [active.cache.length for active in decoding]
+        started = time.perf_counter()
+        device = self.generator.decoder.device
+        events = None
+        if device.type == "cuda":
+            stream = torch.cuda.current_stream(device)
+            if self._decode_events is None:
+                self._decode_events = (
+                    torch.cuda.Event(enable_timing=True),
+                    torch.cuda.Event(enable_timing=True),
+                )
+            events = self._decode_events
+            events[0].record(stream)
+        logits = self.generator.decoder.packed_caches(
+            [active.cache for active in decoding], chunks, all_logits=True
+        )
+        if events is not None:
+            events[1].record(stream)
+        predictions = logits.argmax(dim=-1).cpu().tolist()
+        sampled_at = time.perf_counter()
+        elapsed = (
+            events[0].elapsed_time(events[1]) / 1_000
+            if events is not None
+            else sampled_at - started
+        )
+        offset = 0
+        removed = set()
+        for active, chunk, start in zip(decoding, chunks, starts, strict=True):
+            tokens = predictions[offset : offset + len(chunk)]
+            offset += len(chunk)
+            accepted = 0
+            for proposal, token in zip(chunk[1:], tokens):
+                if proposal != token:
+                    break
+                accepted += 1
+            active.cache.truncate(start + 1 + accepted)
+            active.inter_token_seconds.append(elapsed)
+            for token in tokens[: accepted + 1]:
+                if not self._accept_token(active, token, active.queue_seconds, sampled_at):
+                    removed.add(id(active))
+                    break
+        self._active_requests = [
+            active for active in self._active_requests if id(active) not in removed
+        ]
+        self.generator.reserve_active_cache(self._reserved_memory_bytes())
+        return True
 
     def _decode_active_requests(self) -> None:
         decoding = [

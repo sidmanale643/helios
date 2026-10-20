@@ -32,6 +32,7 @@ def warm_decode(
     max_tokens: int,
     budget_tokens: int,
     prefill_chunk_size: int = 256,
+    speculative: bool = False,
 ) -> tuple[int, tuple[int, ...]]:
     sampling = Sampling(temperature=0, top_p=1, max_new_tokens=DECODE_WARMUP_STEPS)
     device = decoder.device
@@ -91,7 +92,9 @@ def warm_decode(
                         result = None
                     if mixed and decoder.page_pool is not None:
                         decoder.packed_caches(
-                            caches, [[input_ids[-1]] * count for count in packed_counts]
+                            caches,
+                            [[input_ids[-1]] * count for count in packed_counts],
+                            all_logits=speculative,
                         )
                     for _ in range(DECODE_WARMUP_STEPS):
                         decoder.decode_caches(caches, [input_ids[-1]] * batch_size)
