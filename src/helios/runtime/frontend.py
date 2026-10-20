@@ -263,6 +263,12 @@ class TextGenerator:
             warmup_peak_bytes=max(warmup_peak_bytes, decode_activation_bytes),
             warmup_kv_bytes=0,
         )
+        if self.engine.compilation_enabled:
+            try:
+                run(input_ids, "startup-warmup-final-pool")
+                self.engine.generator.decoder._synchronize()
+            finally:
+                self.engine.generator.prefix_cache.clear()
         self._decode_warmup_batch_sizes = decode_batch_sizes
         self._warmed = True
 
