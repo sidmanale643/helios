@@ -262,7 +262,7 @@ class Decoder:
         caches: list[PagedKVCache],
         chunks: list[list[int]],
         *,
-        all_logits: bool = False,
+        logit_counts: list[int] | None = None,
     ) -> torch.Tensor:
         if (
             not caches
@@ -279,14 +279,13 @@ class Decoder:
             if batch is None or batch.pool is not caches[0].pool:
                 batch = self._packed_batch = PackedBatchCache(caches)
             batch.caches, batch.batch_size = tuple(caches), len(caches)
-            batch.all_logits = all_logits
             try:
                 tokens = batch.metadata(
                     "token_ids",
                     [token for chunk in chunks for token in chunk],
                     torch.long,
                 ).unsqueeze(0)
-                batch.prepare_packed([len(chunk) for chunk in chunks])
+                batch.prepare_packed([len(chunk) for chunk in chunks], logit_counts)
                 return self.model(tokens, cache=batch)
             finally:
                 batch.caches = ()

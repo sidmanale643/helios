@@ -2,6 +2,7 @@ import logging
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field, replace
+from itertools import accumulate
 from threading import Lock
 
 import torch
@@ -13,7 +14,7 @@ from helios.runtime.load import Loader
 from helios.runtime.prefix_cache import PromptBlockView, describe_prompt_blocks
 from helios.runtime.qwen3.paged_cache import PagedKVCache
 from helios.runtime.scheduler import Job, Scheduler
-from helios.runtime.speculative import propose_ngram
+from helios.runtime.speculative import LOOKUP_WINDOW, NgramDrafter
 from helios.runtime.types import Sampling
 
 logger = logging.getLogger("uvicorn.error")
@@ -49,6 +50,7 @@ class _ActiveRequest:
     first_token_at: float | None = None
     last_token_at: float | None = None
     token_intervals: list[float] = field(default_factory=list)
+    drafter: NgramDrafter | None = None
 
 
 class Engine:
@@ -68,6 +70,7 @@ class Engine:
         self._max_batch_size = config.max_batch_size
         self._prefill_chunk_size = config.prefill_chunk_size
         self._speculative_tokens = config.speculative_tokens
+        self._speculative_min_ngram = config.speculative_min_ngram
         self._active_requests: list[_ActiveRequest] = []
         self._scheduler: Scheduler[_Request, GenerationResult] = Scheduler(
             self._continuous_tick,
@@ -151,7 +154,7 @@ class Engine:
                 max_tokens=capacity.max_tokens,
                 budget_tokens=capacity.kv_budget_bytes // capacity.bytes_per_token,
                 prefill_chunk_size=self._prefill_chunk_size,
-                speculative=self._speculative_tokens > 0,
+                speculative_tokens=self._speculative_tokens,
             )
 
     def run_warmup(
@@ -330,21 +333,19 @@ class Engine:
             for active in self._active_requests
             if active.pending_token_id is not None
         ]
-        if (
-            self._speculative_tokens
-            and len(decoding) == len(self._active_requests)
-            and all(active.request.sampling.temperature == 0 for active in decoding)
-            and self._run_speculative_batch(decoding)
-        ):
-            return
-        selected = list(decoding)
-        chunks = [[active.pending_token_id] for active in decoding]
-        budget = max(self._prefill_chunk_size, len(decoding) + 1) - len(decoding)
         pending = [
             active
             for active in self._active_requests
             if active.pending_token_id is None
         ]
+        selected = list(decoding)
+        budget = max(self._prefill_chunk_size, len(decoding) + 1) - len(decoding)
+        chunks = []
+        for active in decoding:
+            # Drafts share the tick budget but always leave a prefill token.
+            draft = self._propose_draft(active, budget - 1 if pending else budget)
+            budget -= len(draft)
+            chunks.append([active.pending_token_id, *draft])
         now = time.perf_counter()
         while pending and budget > 0:
             aged = [
@@ -374,65 +375,20 @@ class Engine:
         if selected:
             self._execute_batch(selected, chunks)
 
-    def _run_speculative_batch(self, decoding: list[_ActiveRequest]) -> bool:
-        budget = max(self._prefill_chunk_size, len(decoding) + 1) - len(decoding)
-        chunks = []
-        for active in decoding:
-            remaining = active.request.sampling.max_new_tokens - len(active.output_ids)
-            proposals = propose_ngram(
-                active.request.input_ids + active.output_ids,
-                min(self._speculative_tokens, remaining - 1, budget),
+    def _propose_draft(self, active: _ActiveRequest, budget: int) -> list[int]:
+        if not self._speculative_tokens or active.request.sampling.temperature != 0:
+            return []
+        remaining = active.request.sampling.max_new_tokens - len(active.output_ids)
+        limit = min(remaining - 1, budget)
+        if limit <= 0:
+            return []
+        if active.drafter is None:
+            active.drafter = NgramDrafter(
+                active.request.input_ids[-LOOKUP_WINDOW:] + active.output_ids,
+                max_tokens=self._speculative_tokens,
+                min_ngram=self._speculative_min_ngram,
             )
-            chunks.append([active.pending_token_id, *proposals])
-            budget -= len(proposals)
-        if not any(len(chunk) > 1 for chunk in chunks):
-            return False
-        starts = [active.cache.length for active in decoding]
-        started = time.perf_counter()
-        device = self.generator.decoder.device
-        events = None
-        if device.type == "cuda":
-            stream = torch.cuda.current_stream(device)
-            if self._decode_events is None:
-                self._decode_events = (
-                    torch.cuda.Event(enable_timing=True),
-                    torch.cuda.Event(enable_timing=True),
-                )
-            events = self._decode_events
-            events[0].record(stream)
-        logits = self.generator.decoder.packed_caches(
-            [active.cache for active in decoding], chunks, all_logits=True
-        )
-        if events is not None:
-            events[1].record(stream)
-        predictions = logits.argmax(dim=-1).cpu().tolist()
-        sampled_at = time.perf_counter()
-        elapsed = (
-            events[0].elapsed_time(events[1]) / 1_000
-            if events is not None
-            else sampled_at - started
-        )
-        offset = 0
-        removed = set()
-        for active, chunk, start in zip(decoding, chunks, starts, strict=True):
-            tokens = predictions[offset : offset + len(chunk)]
-            offset += len(chunk)
-            accepted = 0
-            for proposal, token in zip(chunk[1:], tokens):
-                if proposal != token:
-                    break
-                accepted += 1
-            active.cache.truncate(start + 1 + accepted)
-            active.inter_token_seconds.append(elapsed)
-            for token in tokens[: accepted + 1]:
-                if not self._accept_token(active, token, active.queue_seconds, sampled_at):
-                    removed.add(id(active))
-                    break
-        self._active_requests = [
-            active for active in self._active_requests if id(active) not in removed
-        ]
-        self.generator.reserve_active_cache(self._reserved_memory_bytes())
-        return True
+        return active.drafter.propose(limit)
 
     def _decode_active_requests(self) -> None:
         decoding = [
@@ -452,6 +408,14 @@ class Engine:
         decoding = [
             active for active in selected if active.pending_token_id is not None
         ]
+        # Decoding rows need a logit per draft token; prefill rows only their last.
+        logit_counts = [
+            len(chunk) if active.pending_token_id is not None else 1
+            for active, chunk in zip(selected, chunks, strict=True)
+        ]
+        logit_starts = list(accumulate(logit_counts, initial=0))
+        drafted = any(count > 1 for count in logit_counts)
+        cache_lengths = [active.cache.length for active in selected]
         started = time.perf_counter()
         device = self.generator.decoder.device
         events = None
@@ -470,13 +434,15 @@ class Engine:
                 [active.request.request_id for active in decoding],
                 self._memory_log_fields(self._reserved_memory_bytes()),
             )
-        if len(decoding) == len(selected):
+        if len(decoding) == len(selected) and not drafted:
             logits = self.generator.decoder.decode_caches(
                 [active.cache for active in selected], [chunk[0] for chunk in chunks]
             )
         else:
             logits = self.generator.decoder.packed_caches(
-                [active.cache for active in selected], chunks
+                [active.cache for active in selected],
+                chunks,
+                logit_counts=logit_counts,
             )
         if events is not None:
             events[1].record(stream)
@@ -488,8 +454,8 @@ class Engine:
                 active.prefill_wait_started = time.perf_counter()
                 if active.prompt_offset < len(active.request.input_ids):
                     continue
-            ready.append(active)
-            rows.append(row)
+            ready.append(row)
+            rows.append(logit_starts[row])
         if not ready:
             self.generator.decoder._synchronize()
             elapsed = (
@@ -500,27 +466,30 @@ class Engine:
             for active in selected:
                 active.prefill_seconds += elapsed
             return
-        logits = logits[rows]
-        if all(active.request.sampling.temperature == 0 for active in ready):
-            sampled = logits.argmax(dim=-1)
+        heads = logits[rows]
+        samplings = [selected[row].request.sampling for row in ready]
+        if all(sampling.temperature == 0 for sampling in samplings):
+            sampled = heads.argmax(dim=-1)
         elif all(
-            active.request.sampling.temperature == ready[0].request.sampling.temperature
-            and active.request.sampling.top_p == ready[0].request.sampling.top_p
-            for active in ready
+            sampling.temperature == samplings[0].temperature
+            and sampling.top_p == samplings[0].top_p
+            for sampling in samplings
         ):
-            sampled = self.generator.decoder._sample(
-                logits, ready[0].request.sampling
-            ).reshape(-1)
+            sampled = self.generator.decoder._sample(heads, samplings[0]).reshape(-1)
         else:
             sampled = torch.cat(
                 [
                     self.generator.decoder._sample(
-                        logits[row : row + 1], active.request.sampling
+                        heads[index : index + 1], sampling
                     ).reshape(-1)
-                    for row, active in enumerate(ready)
+                    for index, sampling in enumerate(samplings)
                 ]
             )
+        if drafted:
+            # One transfer carries both the sampled heads and draft verification.
+            sampled = torch.cat([sampled, logits.argmax(dim=-1)])
         token_ids = sampled.cpu().tolist()
+        verified = token_ids[len(ready) :]
         sampled_at = time.perf_counter()
         elapsed = (
             events[0].elapsed_time(events[1]) / 1_000
@@ -534,11 +503,26 @@ class Engine:
             else:
                 active.inter_token_seconds.append(elapsed)
         removed = set()
-        for active, token_id in zip(ready, token_ids, strict=True):
-            if not self._accept_token(
-                active, token_id, active.queue_seconds, sampled_at
-            ):
-                removed.add(id(active))
+        for row, token_id in zip(ready, token_ids[: len(ready)], strict=True):
+            active, chunk = selected[row], chunks[row]
+            tokens = [token_id]
+            if logit_counts[row] > 1:
+                start = logit_starts[row]
+                predictions = verified[start : start + len(chunk)]
+                accepted = 0
+                for proposal, prediction in zip(chunk[1:], predictions):
+                    if proposal != prediction:
+                        break
+                    accepted += 1
+                active.cache.truncate(cache_lengths[row] + 1 + accepted)
+                active.drafter.record(len(chunk) - 1, accepted)
+                tokens = predictions[: accepted + 1]
+            for token in tokens:
+                if not self._accept_token(
+                    active, token, active.queue_seconds, sampled_at
+                ):
+                    removed.add(id(active))
+                    break
         self._active_requests = [
             active for active in self._active_requests if id(active) not in removed
         ]
@@ -561,6 +545,8 @@ class Engine:
             active.token_intervals.append(sampled_at - active.last_token_at)
         active.last_token_at = sampled_at
         active.output_ids.append(token_id)
+        if active.drafter is not None:
+            active.drafter.append(token_id)
         if len(active.output_ids) == active.request.sampling.max_new_tokens:
             self._complete_request(active, "length", queue_seconds)
             return False

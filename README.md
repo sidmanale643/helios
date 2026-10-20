@@ -158,22 +158,30 @@ summing them across requests does not estimate GPU utilization.
 
 Set `HELIOS_SPECULATIVE_TOKENS=4` to enable n-gram speculation for greedy
 (`temperature: 0`) requests. The default is `0` (disabled); supported values are
-0 through 16. Helios searches the last 4,096 context tokens for a matching
-suffix of up to four tokens and proposes its continuation, without a second
-model. A single causal target-model forward verifies the proposals. Decoding
-accepts the matching prefix, emits the target token at the first mismatch (or
-one bonus token if all match), and truncates rejected KV entries.
+0 through 16. Each greedy request keeps an incremental index of the n-grams in
+its last 4,096 prompt tokens plus its output, so a lookup costs a few dictionary
+probes per tick. Helios proposes the continuation of the longest matching suffix
+(up to four tokens, at least `HELIOS_SPECULATIVE_MIN_NGRAM`, default 2) without a
+second model. A single causal target-model forward verifies the proposals.
+Decoding accepts the matching prefix, emits the target token at the first
+mismatch (or one bonus token if all match), and truncates rejected KV entries.
 
-Speculation runs only on ticks where all active requests are decoding greedily.
-Pending prefills and nonzero-temperature requests use ordinary batching. Draft
-verification shares the existing per-tick token budget and respects each
+Drafts ride in the same packed batch as prefill chunks and sampled requests, so
+speculation keeps running under mixed load. Only the rows that need logits are
+projected through the output head: every position of a drafted chunk, and the
+last position of every other row. Draft tokens share the per-tick token budget,
+always leaving at least one token for a pending prefill, and respect each
 request's remaining output allowance. EOS still stops generation immediately.
-Warmup profiles the extra verification logits when speculation is enabled.
 
-This can reduce target-model calls for repeated context, but adds lookup and
-verification work. It does not guarantee a speedup. Greedy choices use the target
-model; floating-point differences between single-token and packed forwards can
-still affect near-tied logits. Benchmark on the target CUDA GPU before enabling.
+The draft length adapts per request: it grows by two after a fully accepted
+draft and shrinks by one otherwise. A fully rejected draft pauses speculation for
+that request for 1, 2, 4, … ticks (capped at 32) until a draft is accepted again.
+Warmup sizes the verification logits for every decoder verifying a full draft.
+
+This can reduce target-model calls for repeated context, but adds verification
+work. It does not guarantee a speedup. Greedy choices use the target model;
+floating-point differences between single-token and packed forwards can still
+affect near-tied logits. Benchmark on the target CUDA GPU before enabling.
 Tokens accepted together share a completion timestamp; forward timing is counted
 once per verification round. CUDA events measure the target forward, matching
 the ordinary decode compute timing.
@@ -284,6 +292,7 @@ Helios loads a local `.env` file automatically.
 | `HELIOS_PREFIX_CACHE_TTL_SECONDS` | `300` | Sliding lifetime of a cached prompt block. |
 | `HELIOS_PREFILL_CHUNK_SIZE` | `256` | Shared prefill and decode token budget per tick. At least one token per decoder plus one for prefill. |
 | `HELIOS_SPECULATIVE_TOKENS` | `0` | Maximum n-gram draft tokens per greedy request (0–16). Zero disables speculation. |
+| `HELIOS_SPECULATIVE_MIN_NGRAM` | `2` | Shortest suffix match (1–4) that may propose a draft. |
 | `HELIOS_MAX_BATCH_SIZE` | `8` | Maximum number of concurrently active continuous requests. |
 | `HELIOS_MAX_QUEUE_SIZE` | `32` | Maximum number of waiting jobs. Excess work receives HTTP 503. |
 | `HELIOS_BATCH_WAIT_MS` | `2` | Initial admission window after the first queued request arrives. |
