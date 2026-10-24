@@ -162,6 +162,12 @@ class PagedKVCache:
         self.pages = pages
         self.length = length
 
+    def truncate(self, length: int) -> None:
+        if self._pending_tokens is not None or not 0 <= length <= self.length:
+            raise ValueError("Cannot truncate beyond committed KV tokens.")
+        self.length = length
+        del self.pages[_pages_for(length, self.pool.page_size):]
+
     def close(self) -> None:
         self.pages.clear()
         self.length = 0
@@ -409,9 +415,17 @@ def _gather_cpu(
 
 
 class PackedBatchCache(PagedBatchCache):
-    def prepare_packed(self, counts: Sequence[int]) -> None:
+    def prepare_packed(
+        self, counts: Sequence[int], logit_counts: Sequence[int] | None = None
+    ) -> None:
         if len(counts) != len(self.caches) or any(count < 1 for count in counts):
             raise ValueError("Each packed sequence needs at least one query token.")
+        logit_counts = [1] * len(counts) if logit_counts is None else logit_counts
+        if len(logit_counts) != len(counts) or any(
+            not 1 <= tail <= count
+            for tail, count in zip(logit_counts, counts, strict=True)
+        ):
+            raise ValueError("Logit rows must be 1 through each sequence length.")
         missing = []
         for cache, count in zip(self.caches, counts, strict=True):
             if (
@@ -457,8 +471,15 @@ class PackedBatchCache(PagedBatchCache):
             for position in range(cache.length, end)
         ]
         self.positions = self.metadata("positions", positions, torch.long).unsqueeze(0)
-        self.last_indices = self.metadata(
-            "last_indices", [offset - 1 for offset in offsets[1:]], torch.long
+        # Logits are produced only for each sequence's trailing positions.
+        self.logit_indices = self.metadata(
+            "logit_indices",
+            [
+                index
+                for end, tail in zip(offsets[1:], logit_counts, strict=True)
+                for index in range(end - tail, end)
+            ],
+            torch.long,
         )
         self.write_slots = self.metadata(
             "write_slots",
