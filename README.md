@@ -277,10 +277,13 @@ HELIOS_TORCH_COMPILE=1 uv run helios 2>&1 | tee /tmp/helios-compile.log
 ```
 
 This compiles the model in place after weight loading, covering paged prefill,
-decode, and mixed batches. The dense `decode_forward` reference method remains
-eager. Scheduling, page allocation before the forward, and sampling stay outside
-the compiled call. The default compiler mode and automatic dynamic-shape policy
-are used. Compilation can increase startup time, memory use, and request latency;
+decode, and mixed batches. The dense `decode_forward` method is compiled separately
+with the same settings. Scheduling, page allocation before the forward, and sampling
+stay outside the compiled call. Both entry points use the default compiler mode
+and `dynamic=True` to reduce recompilation as batch sizes change. Size-one dimensions,
+Python cache metadata, and control-flow changes can still specialize graphs;
+dynamic shapes do not guarantee one graph for every batch. Compilation can increase
+startup time, memory use, and request latency;
 it is disabled by default and does not imply a performance improvement.
 
 Diagnostics use PyTorch's native logs: `graph_breaks` identifies unsupported code

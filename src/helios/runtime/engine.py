@@ -55,6 +55,7 @@ class Engine:
         loaded = (loader or Loader()).load(config)
         self.model_id = config.model_id
         self.model_revision = loaded.model_revision
+        self.compilation_enabled = config.torch_compile
         self._memory_checker = MemoryChecker(config)
         self.report = loaded.report
         self.generator = Generator(
